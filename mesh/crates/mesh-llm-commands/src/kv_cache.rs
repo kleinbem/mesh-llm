@@ -109,7 +109,7 @@ async fn request(
     path: &str,
     body: Option<Value>,
 ) -> Result<Value> {
-    let client = reqwest::Client::builder()
+    let client = mesh_llm_system::local_http::local_http_client_builder()
         // The runtime bounds a remote batch at 45 seconds and returns one
         // result per requested endpoint, including explicit timeout receipts.
         // Leave transport and JSON-decoding margin outside that server bound.

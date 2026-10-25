@@ -19,7 +19,7 @@ pub async fn run(command: &WalletCommand, port: u16, config: Option<&Path>) -> R
             .join("payments");
         request["expected_directory"] = serde_json::to_value(directory)?;
     }
-    let client = reqwest::Client::builder().no_proxy().build()?;
+    let client = mesh_llm_system::local_http::local_http_client_builder().build()?;
     let result = client
         .post(format!("http://127.0.0.1:{port}/api/wallet"))
         .json(&request)

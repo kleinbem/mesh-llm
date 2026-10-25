@@ -171,6 +171,34 @@ fn doctor_network_runs_without_a_ca_bundle() {
     );
 }
 
+// The wallet's console client stands for the other local clients in
+// mesh-llm-commands (agent launchers, kv-cache, GPU tune trials).
+#[test]
+fn wallet_runs_without_a_ca_bundle() {
+    let temp = tempfile::tempdir().unwrap();
+    let empty_file = temp.path().join("empty.pem");
+    std::fs::write(&empty_file, "").unwrap();
+    let empty_dir = temp.path().join("certs");
+    std::fs::create_dir(&empty_dir).unwrap();
+    let (port, server) = serve_once(r#"{"balance_msat": 0}"#);
+    let output = Command::new(env!("CARGO_BIN_EXE_mesh-llm"))
+        .args(["wallet", "--port", &port.to_string(), "get-balance"])
+        .env("SSL_CERT_FILE", &empty_file)
+        .env("SSL_CERT_DIR", &empty_dir)
+        .output()
+        .expect("mesh-llm command should run");
+    assert!(
+        output.status.success(),
+        "command failed: {}",
+        stderr(&output)
+    );
+    let request = server.join().expect("test server should not panic");
+    assert!(
+        request.starts_with("POST /api/wallet "),
+        "unexpected request: {request}"
+    );
+}
+
 fn run_mesh_llm<const N: usize>(args: [&str; N]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_mesh-llm"))
         .args(args)

@@ -608,7 +608,7 @@ async fn fetch_mesh_models(
 }
 
 pub async fn run_goose(model: Option<String>, port: u16, console_port: u16) -> Result<()> {
-    let client = reqwest::Client::builder()
+    let client = mesh_llm_system::local_http::local_http_client_builder()
         .timeout(std::time::Duration::from_secs(5))
         .build()?;
     let (models, chosen, mut mesh_child) =
@@ -691,7 +691,7 @@ pub async fn run_goose(model: Option<String>, port: u16, console_port: u16) -> R
 }
 
 pub async fn run_claude(model: Option<String>, port: u16, console_port: u16) -> Result<()> {
-    let client = reqwest::Client::builder()
+    let client = mesh_llm_system::local_http::local_http_client_builder()
         .timeout(std::time::Duration::from_secs(5))
         .build()?;
     let (models, chosen, mut mesh_child) =

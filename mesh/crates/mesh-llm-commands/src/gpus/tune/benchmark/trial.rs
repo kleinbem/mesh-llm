@@ -66,7 +66,7 @@ pub(crate) fn run_trial_inner(
     )?;
 
     let request_timeout = std::time::Duration::from_secs(request.request_timeout_secs.max(1));
-    let client = reqwest::blocking::Client::builder()
+    let client = mesh_llm_system::local_http::local_http_blocking_client_builder()
         .timeout(request_timeout)
         .build()?;
     timings.setup_ms = elapsed_ms_since(setup_started);
