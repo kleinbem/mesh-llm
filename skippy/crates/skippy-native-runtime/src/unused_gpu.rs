@@ -425,4 +425,31 @@ mod tests {
 
         assert!(unused_gpu_backends(&[], &[], &profile, &selection, &cpu).is_empty());
     }
+
+    #[test]
+    fn a_vulkan_icd_beside_cuda_without_a_vulkan_runtime_is_not_a_second_gpu() {
+        // A Jetson with vulkan-tools: Vulkan is detected, but no linux/aarch64
+        // Vulkan runtime exists, so only the CUDA side is worth naming.
+        let mut profile = cuda12_host();
+        profile
+            .available_flavors
+            .insert(NativeRuntimeBackendKind::Vulkan);
+        let cpu = artifact("cpu", NativeRuntimeBackend::cpu(), "aarch64");
+        let artifacts = [cpu.clone(), artifact("cuda13", cuda(13), "aarch64")];
+        let evaluated = evaluate(&artifacts, &profile);
+
+        let unused = unused_gpu_backends(
+            &evaluated,
+            &[],
+            &profile,
+            &RuntimeSelection::Recommended,
+            &cpu,
+        );
+
+        let line = describe_unused_gpu_backends(&unused).unwrap();
+        assert!(
+            line.starts_with("cuda GPU detected, but its runtimes don't fit: cuda13 ("),
+            "{line}"
+        );
+    }
 }
