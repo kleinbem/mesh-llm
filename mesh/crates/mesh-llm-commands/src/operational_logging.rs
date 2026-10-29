@@ -185,6 +185,7 @@ mod tests {
     use super::*;
     use anyhow::{Error, anyhow};
     use clap::Parser;
+    use mesh_llm_cli::{DiscoverArgs, DownloadArgs, LoadArgs};
     use mesh_llm_events::{clear_output_sink, set_cli_command_event_verbose, set_output_sink};
     use std::io;
 
@@ -255,10 +256,10 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn command_dispatch_orders_started_before_completed_without_command_arguments() {
-        let command = Command::Load {
+        let command = Command::Load(LoadArgs {
             name: "private-model.gguf?token=private-token".to_string(),
             port: 41731,
-        };
+        });
         let events = lifecycle_events(&command, &Ok(()));
         assert_eq!(
             events[0].clone(),
@@ -281,14 +282,14 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn explicit_handler_rejection_maps_to_rejected_without_error_detail() {
-        let command = Command::Discover {
+        let command = Command::Discover(DiscoverArgs {
             name: Some("private-mesh".to_string()),
             model: None,
             min_vram: None,
             region: Some("private-region".to_string()),
             auto: false,
             relay: vec!["wss://relay.private.example/?token=private-token".to_string()],
-        };
+        });
         let result: Result<()> = Err(Error::new(CommandDispatchRejected)
             .context("private command rejection detail with private-token"));
         let events = lifecycle_events(&command, &result);
@@ -305,10 +306,10 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn unmarked_dispatch_failure_maps_to_failed_without_error_detail() {
-        let command = Command::Download {
+        let command = Command::Download(DownloadArgs {
             name: Some("private/model?token=private-token".to_string()),
             draft: true,
-        };
+        });
         let result: Result<()> = Err(anyhow!(
             "download failed for https://private.example/model?token=private-token"
         ));
@@ -341,10 +342,10 @@ mod tests {
                 .expect("recording bridge mutex poisoned")
                 .push((family, outcome));
         }));
-        let boundary = CommandDispatchBoundary::start(&Command::Load {
+        let boundary = CommandDispatchBoundary::start(&Command::Load(LoadArgs {
             name: "model.gguf".to_string(),
             port: 9337,
-        });
+        }));
         boundary.finish(&Ok(()));
         assert_eq!(sink.take_events().len(), 2);
         assert_eq!(
@@ -360,10 +361,10 @@ mod tests {
     #[serial_test::serial]
     fn command_dispatch_without_bridge_stays_fail_open() {
         clear_cli_operational_audit_bridge();
-        let boundary = CommandDispatchBoundary::start(&Command::Load {
+        let boundary = CommandDispatchBoundary::start(&Command::Load(LoadArgs {
             name: "private-model.gguf".to_string(),
             port: 41731,
-        });
+        }));
         boundary.finish(&Err(anyhow!("private dispatch failure")));
         assert!(cli_operational_audit_bridge().is_none());
     }
@@ -381,14 +382,14 @@ mod tests {
                 .expect("recording bridge mutex poisoned")
                 .push((family, outcome));
         }));
-        let boundary = CommandDispatchBoundary::start(&Command::Discover {
+        let boundary = CommandDispatchBoundary::start(&Command::Discover(DiscoverArgs {
             name: Some("private-mesh".to_string()),
             model: None,
             min_vram: None,
             region: Some("private-region".to_string()),
             auto: false,
             relay: vec!["wss://relay.private.example/?token=private-token".to_string()],
-        });
+        }));
         boundary.finish(&Err(Error::new(CommandDispatchRejected)
             .context("private command rejection detail with private-token")));
         assert_eq!(
@@ -411,10 +412,10 @@ mod tests {
         install_cli_operational_audit_bridge(Arc::new(move |_, _, summary| {
             calls.lock().expect("bridge mutex").push(summary)
         }));
-        let boundary = CommandDispatchBoundary::start(&Command::Load {
+        let boundary = CommandDispatchBoundary::start(&Command::Load(LoadArgs {
             name: "model.gguf".to_owned(),
             port: 9337,
-        });
+        }));
         boundary.finish(&Ok(()));
         assert_eq!(
             recording.lock().expect("bridge mutex").as_slice(),

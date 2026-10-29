@@ -1,9 +1,12 @@
 use super::{Cli, Command};
+use crate::parser::{ClaudeArgs, GooseArgs};
 use clap::Parser;
 
 fn console_of(args: &[&str]) -> u16 {
     match Cli::parse_from(args).command {
-        Some(Command::Goose { console, .. } | Command::Claude { console, .. }) => console,
+        Some(
+            Command::Goose(GooseArgs { console, .. }) | Command::Claude(ClaudeArgs { console, .. }),
+        ) => console,
         _ => panic!("expected an agent launcher command"),
     }
 }

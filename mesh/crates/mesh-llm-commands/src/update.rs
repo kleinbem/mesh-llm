@@ -1,15 +1,15 @@
 use anyhow::Result;
-use mesh_llm_cli::{BinaryFlavor, Cli, Command};
+use mesh_llm_cli::{BinaryFlavor, Cli, Command, UpdateArgs};
 use mesh_llm_system::{autoupdate, backend};
 
 pub async fn run_update(cli: &Cli) -> Result<()> {
     let (requested_version, flavor, detect_flavor, no_default_plugins) = match &cli.command {
-        Some(Command::Update {
+        Some(Command::Update(UpdateArgs {
             version,
             flavor,
             detect_flavor,
             no_default_plugins,
-        }) => (
+        })) => (
             version.as_deref(),
             binary_flavor_to_backend(*flavor),
             *detect_flavor,

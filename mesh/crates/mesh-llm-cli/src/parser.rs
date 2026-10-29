@@ -2,6 +2,7 @@ mod commands;
 mod logging_help;
 mod normalization;
 mod runtime_surface_help;
+mod subcommand_args;
 mod suggestion_redaction;
 mod top_level_options;
 mod validation;
@@ -17,6 +18,11 @@ pub use normalization::{
     normalize_runtime_surface_args, raw_args_invoke_analytics, value_taking_option_names,
 };
 pub use runtime_surface_help::runtime_surface_help;
+pub use subcommand_args::{
+    ClaudeArgs, DiscoverArgs, DoctorArgs, DownloadArgs, GooseArgs, GpusArgs, LoadArgs,
+    ModelPrepareArgs, OpencodeArgs, PiArgs, SetupArgs, StatusArgs, UninstallArgs, UnloadArgs,
+    UpdateArgs, WalletArgs,
+};
 pub use top_level_options::{
     JoiningOptions, KvCacheOptions, LoggingOptions, MeshPolicyOptions, NetworkOptions,
     NodeModeOptions, OwnerOptions, PlacementOptions, ServingOptions, SpeculativeOptions,

@@ -9,7 +9,11 @@ mod runtime;
 mod setup;
 
 use anyhow::Result;
-use mesh_llm_cli::{Cli, Command};
+use mesh_llm_cli::{
+    ClaudeArgs, Cli, Command, DiscoverArgs, DoctorArgs, DownloadArgs, GooseArgs, GpusArgs,
+    LoadArgs, ModelPrepareArgs, OpencodeArgs, PiArgs, StatusArgs, UninstallArgs, UnloadArgs,
+    WalletArgs,
+};
 
 use self::analytics::dispatch_analytics_command;
 use self::config::dispatch_config_command;
@@ -81,7 +85,7 @@ fn apply_config_host_ram_offload(config_path: Option<&std::path::Path>) -> Resul
 async fn dispatch_general_command(cli: &Cli, cmd: &Command) -> Result<()> {
     match cmd {
         Command::Serve | Command::Client => Ok(()),
-        Command::Wallet { port, command } => {
+        Command::Wallet(WalletArgs { port, command }) => {
             mesh_llm_commands::wallet::run(command, *port, cli.config.as_deref()).await
         }
         Command::Models { command } => {
@@ -89,12 +93,12 @@ async fn dispatch_general_command(cli: &Cli, cmd: &Command) -> Result<()> {
             dispatch_models_command(command).await?;
             Ok(())
         }
-        Command::Download { name, draft } => {
+        Command::Download(DownloadArgs { name, draft }) => {
             apply_config_host_ram_offload(cli.config.as_deref())?;
             dispatch_download_command(name.as_deref(), *draft).await
         }
         Command::Update { .. } => mesh_llm_commands::update::run_update(cli).await,
-        Command::Gpus { json, command } => {
+        Command::Gpus(GpusArgs { json, command }) => {
             mesh_llm_commands::gpus::dispatch_gpu_command(
                 *json,
                 command.as_ref(),
@@ -111,7 +115,7 @@ async fn dispatch_general_command(cli: &Cli, cmd: &Command) -> Result<()> {
         Command::Analytics { command } => {
             dispatch_analytics_command(command, cli.config.as_deref())
         }
-        Command::Uninstall {
+        Command::Uninstall(UninstallArgs {
             dry_run,
             yes,
             keep_cache,
@@ -121,7 +125,7 @@ async fn dispatch_general_command(cli: &Cli, cmd: &Command) -> Result<()> {
             binary_path,
             json,
             verbose,
-        } => mesh_llm_commands::uninstall::run_uninstall_command(
+        }) => mesh_llm_commands::uninstall::run_uninstall_command(
             mesh_llm_commands::uninstall::UninstallOptions {
                 dry_run: *dry_run,
                 yes: *yes,
@@ -136,7 +140,7 @@ async fn dispatch_general_command(cli: &Cli, cmd: &Command) -> Result<()> {
             run_stop,
         ),
         Command::Config { command } => dispatch_config_command(cli, command),
-        Command::Doctor { command, json } => {
+        Command::Doctor(DoctorArgs { command, json }) => {
             dispatch_doctor_command(
                 command.as_ref(),
                 cli.config.as_deref(),
@@ -145,19 +149,19 @@ async fn dispatch_general_command(cli: &Cli, cmd: &Command) -> Result<()> {
             )
             .await
         }
-        Command::Load { name, port } => run_load(name, *port).await,
-        Command::Unload { name, port } => run_drop(name, *port).await,
-        Command::Status { port } => run_status(*port).await,
+        Command::Load(LoadArgs { name, port }) => run_load(name, *port).await,
+        Command::Unload(UnloadArgs { name, port }) => run_drop(name, *port).await,
+        Command::Status(StatusArgs { port }) => run_status(*port).await,
         Command::Stop => run_stop(),
         Command::ServiceHost => mesh_llm_commands::setup::run_service_host(),
-        Command::Discover {
+        Command::Discover(DiscoverArgs {
             name,
             model,
             min_vram,
             region,
             auto,
             relay,
-        } => {
+        }) => {
             run_discover(DiscoverOptions {
                 name: name.clone(),
                 model: model.clone(),
@@ -193,20 +197,20 @@ async fn dispatch_general_command(cli: &Cli, cmd: &Command) -> Result<()> {
 
 async fn dispatch_agent_command(cmd: &Command) -> Result<()> {
     match cmd {
-        Command::Goose {
+        Command::Goose(GooseArgs {
             model,
             port,
             console,
-        } => mesh_llm_commands::agent_cli::run_goose(model.clone(), *port, *console).await,
-        Command::Claude {
+        }) => mesh_llm_commands::agent_cli::run_goose(model.clone(), *port, *console).await,
+        Command::Claude(ClaudeArgs {
             model,
             port,
             console,
-        } => mesh_llm_commands::agent_cli::run_claude(model.clone(), *port, *console).await,
-        Command::Pi { model, host, write } => {
+        }) => mesh_llm_commands::agent_cli::run_claude(model.clone(), *port, *console).await,
+        Command::Pi(PiArgs { model, host, write }) => {
             mesh_llm_commands::agent_cli::run_pi(model.clone(), host, *write).await
         }
-        Command::Opencode { model, host, write } => {
+        Command::Opencode(OpencodeArgs { model, host, write }) => {
             mesh_llm_commands::agent_cli::run_opencode(model.clone(), host, *write).await
         }
         _ => unreachable!("dispatch_agent_command called for non-agent command"),
@@ -214,7 +218,7 @@ async fn dispatch_agent_command(cmd: &Command) -> Result<()> {
 }
 
 async fn dispatch_model_prepare(cmd: &Command) -> Result<()> {
-    let Command::ModelPrepare {
+    let Command::ModelPrepare(ModelPrepareArgs {
         source_repo,
         quant,
         target,
@@ -231,7 +235,7 @@ async fn dispatch_model_prepare(cmd: &Command) -> Result<()> {
         cancel,
         list,
         update_script,
-    } = cmd
+    }) = cmd
     else {
         unreachable!("dispatch_model_prepare called for non-model-prepare command");
     };
