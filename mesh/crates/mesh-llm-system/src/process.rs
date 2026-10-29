@@ -692,6 +692,51 @@ mod pid_identity_tests {
         assert_eq!(pid_identity(pid, "anything", None), PidIdentity::Gone);
     }
 
+    const SLEEPER_ENV: &str = "MESH_LLM_SYSTEM_TEST_SLEEPER";
+
+    /// Holds the copy started by the next test running; returns at once
+    /// otherwise.
+    #[test]
+    fn sleeper() {
+        if std::env::var_os(SLEEPER_ENV).is_some() {
+            std::thread::sleep(std::time::Duration::from_secs(30));
+        }
+    }
+
+    // The kernel names a process after the file it was started from, and
+    // that name has to survive the file being renamed or deleted while the
+    // process runs, as when a release replaces the binary under a node.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn a_running_process_keeps_its_identity_when_its_executable_is_renamed_or_deleted() {
+        let dir = tempfile::tempdir().expect("temporary directory");
+        let executable = dir.path().join("mesh-sleeper");
+        std::fs::copy(std::env::current_exe().unwrap(), &executable).expect("copy the test binary");
+        let mut child = std::process::Command::new(&executable)
+            .args(["--exact", "pid_identity_tests::sleeper", "--nocapture"])
+            .env(SLEEPER_ENV, "1")
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .expect("start the copy");
+        let pid = child.id();
+        let started = process_started_at_unix(pid)
+            .expect("read the start time")
+            .expect("the child is running");
+
+        let mut identities = vec![pid_identity(pid, "mesh-sleeper", Some(started))];
+        let renamed = dir.path().join("renamed");
+        std::fs::rename(&executable, &renamed).expect("rename the executable");
+        identities.push(pid_identity(pid, "mesh-sleeper", Some(started)));
+        std::fs::remove_file(&renamed).expect("delete the executable");
+        identities.push(pid_identity(pid, "mesh-sleeper", Some(started)));
+        let liveness = process_liveness(pid);
+
+        child.kill().expect("stop the child");
+        child.wait().expect("reap the child");
+        assert_eq!(identities, [PidIdentity::Recorded; 3]);
+        assert_eq!(liveness, Liveness::Alive);
+    }
+
     #[cfg(windows)]
     #[test]
     fn an_exited_process_another_handle_still_references_is_gone() {
