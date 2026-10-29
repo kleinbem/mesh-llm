@@ -594,6 +594,7 @@ fn format_bytes(bytes: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mesh_llm_cli::UpdateArgs;
 
     #[test]
     fn runtime_plugin_info_lines_describe_builtin_runtime_plugin() {
@@ -860,10 +861,10 @@ url = "unix:///run/remote.sock"
             .unwrap();
         assert!(matches!(
             cli.command,
-            Some(mesh_llm_cli::Command::Update {
+            Some(mesh_llm_cli::Command::Update(UpdateArgs {
                 no_default_plugins: true,
                 ..
-            })
+            }))
         ));
     }
 }

@@ -599,10 +599,10 @@ fn speculative_overrides_from_cli(
 fn command_uses_machine_output(command: Option<&mesh_llm_cli::Command>) -> bool {
     matches!(
         command,
-        Some(mesh_llm_cli::Command::Doctor {
+        Some(mesh_llm_cli::Command::Doctor(mesh_llm_cli::DoctorArgs {
             json: true,
             command: None,
-        }) | Some(mesh_llm_cli::Command::Runtime {
+        })) | Some(mesh_llm_cli::Command::Runtime {
             command: Some(
                 mesh_llm_cli::runtime::RuntimeCommand::List { json: true, .. }
                     | mesh_llm_cli::runtime::RuntimeCommand::Install { json: true, .. }

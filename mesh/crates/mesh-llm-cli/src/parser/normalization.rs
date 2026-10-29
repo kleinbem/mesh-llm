@@ -792,7 +792,7 @@ mod tests {
         let cli = Cli::try_parse_from(["mesh-llm", "--discover", "status"]).unwrap();
         assert_eq!(cli.joining.discover.as_deref(), Some(""));
         assert!(
-            matches!(cli.command, Some(Command::Status { .. })),
+            matches!(cli.command, Some(Command::Status(_))),
             "status must parse as the subcommand, not as --discover's value"
         );
 
