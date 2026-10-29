@@ -119,6 +119,9 @@ opt-level = 3
 [profile.dev.package.mesh-llm-cli]
 opt-level = 1
 
+[profile.dev.package.skippy-commands]
+opt-level = 1
+
 # Tightened release profile for shipped binaries.
 #
 # - `lto = "thin"`: parallel link-time optimization across the crate graph.
