@@ -136,8 +136,8 @@ fn warnings(
 mod tests {
     use super::*;
     use skippy_native_runtime::{
-        CudaRuntimeRequirements, HostCudaProfile, NativeRuntimeBackend, NativeRuntimeBackendKind,
-        NativeRuntimeManifest, NativeRuntimePlatform,
+        CudaRuntimeRequirements, HostCudaProfile, HostGpuProfile, NativeRuntimeBackend,
+        NativeRuntimeBackendKind, NativeRuntimeManifest, NativeRuntimePlatform,
     };
     use std::collections::BTreeSet;
 
@@ -333,6 +333,10 @@ mod tests {
         let mut host = cuda12_host();
         host.available_flavors
             .insert(NativeRuntimeBackendKind::Vulkan);
+        host.gpus = vec![HostGpuProfile {
+            display_name: "NVIDIA Tegra Orin (nvgpu)".to_string(),
+            ..HostGpuProfile::default()
+        }];
         let artifacts = [artifact("cpu", NativeRuntimeBackend::cpu())];
 
         let warnings = warnings(

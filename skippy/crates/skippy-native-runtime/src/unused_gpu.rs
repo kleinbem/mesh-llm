@@ -7,8 +7,9 @@
 //! their runtimes were rejected, so callers can say so.
 
 use crate::{
-    CandidateEvaluation, HostRuntimeProfile, NativeRuntimeArtifact, NativeRuntimeBackendKind,
-    RuntimeSelection, evaluate_native_runtime_artifact, has_startup_compatibility_metadata,
+    CandidateEvaluation, HostGpuProfile, HostRuntimeProfile, NativeRuntimeArtifact,
+    NativeRuntimeBackendKind, RuntimeSelection, evaluate_native_runtime_artifact,
+    has_startup_compatibility_metadata,
 };
 use std::fmt;
 
@@ -34,10 +35,11 @@ pub struct UnusedGpuBackend {
 /// startup compatibility metadata; those built for another OS or architecture
 /// are left out of the reasons.
 ///
-/// Vulkan runs on the same cards as CUDA and ROCm. When either of those is
-/// detected, Vulkan counts only if a Vulkan runtime for this host was
-/// considered: a Vulkan ICD alone would otherwise read as a second GPU and point
-/// at a runtime this platform may not publish.
+/// Vulkan runs on the same cards as CUDA and ROCm. When every detected GPU is
+/// the CUDA or ROCm one (`vulkan_is_the_dedicated_gpu`), Vulkan counts only
+/// if a Vulkan runtime for this host was considered: its ICD alone would
+/// otherwise read as a second GPU and point at a runtime this platform may not
+/// publish. Any other GPU, or none identified, keeps Vulkan.
 pub fn unused_gpu_backends(
     evaluated: &[CandidateEvaluation],
     missing_metadata: &[NativeRuntimeArtifact],
@@ -62,19 +64,15 @@ pub fn unused_gpu_backends(
                 .iter()
                 .any(|artifact| for_this_host(artifact, kind))
     };
-    let dedicated_gpu = profile.available_flavors.iter().any(|kind| {
-        matches!(
-            kind,
-            NativeRuntimeBackendKind::Cuda | NativeRuntimeBackendKind::Rocm
-        )
-    });
     profile
         .available_flavors
         .iter()
         .filter(|kind| **kind != NativeRuntimeBackendKind::Cpu)
         .filter(|kind| kind.default_rank() > selected_rank)
         .filter(|kind| {
-            **kind != NativeRuntimeBackendKind::Vulkan || !dedicated_gpu || considered(kind)
+            **kind != NativeRuntimeBackendKind::Vulkan
+                || !vulkan_is_the_dedicated_gpu(profile)
+                || considered(kind)
         })
         .filter(|kind| {
             !evaluated
@@ -95,6 +93,49 @@ pub fn unused_gpu_backends(
                 .collect(),
         })
         .collect()
+}
+
+/// Whether Vulkan is only the CUDA or ROCm GPU seen through its Vulkan driver.
+/// The Vulkan probe isn't tied to a device, so that takes every detected GPU
+/// being from the vendor of a detected CUDA or ROCm backend; any other GPU, or
+/// none detected, may be a separate Vulkan path. ROCm counts only with a
+/// version or GPU arch behind it: an "AMD" label alone also names an APU that
+/// ROCm can't use.
+fn vulkan_is_the_dedicated_gpu(profile: &HostRuntimeProfile) -> bool {
+    let cuda = profile
+        .available_flavors
+        .contains(&NativeRuntimeBackendKind::Cuda);
+    let rocm = profile
+        .available_flavors
+        .contains(&NativeRuntimeBackendKind::Rocm)
+        && profile
+            .rocm
+            .as_ref()
+            .is_some_and(|rocm| rocm.version.is_some() || !rocm.gpu_arches.is_empty());
+    !profile.gpus.is_empty()
+        && profile
+            .gpus
+            .iter()
+            .all(|gpu| (cuda && is_nvidia(gpu)) || (rocm && is_amd(gpu)))
+}
+
+/// A GPU `nvidia-smi` listed has `CUDA<n>` as its backend device even when its
+/// name doesn't say NVIDIA (a Jetson's "Orin (nvgpu)").
+fn is_nvidia(gpu: &HostGpuProfile) -> bool {
+    gpu.cuda_sm.is_some() || gpu_label_contains(gpu, &["nvidia", "cuda"])
+}
+
+fn is_amd(gpu: &HostGpuProfile) -> bool {
+    gpu.rocm_gfx.is_some() || gpu_label_contains(gpu, &["amd", "radeon"])
+}
+
+fn gpu_label_contains(gpu: &HostGpuProfile, vendors: &[&str]) -> bool {
+    std::iter::once(&gpu.display_name)
+        .chain(gpu.backend_device.as_ref())
+        .any(|label| {
+            let label = label.to_ascii_lowercase();
+            vendors.iter().any(|vendor| label.contains(vendor))
+        })
 }
 
 impl UnusedGpuBackend {
@@ -205,8 +246,8 @@ impl fmt::Display for UnusedGpuBackend {
 mod tests {
     use super::*;
     use crate::{
-        CudaRuntimeRequirements, HostCudaProfile, NativeRuntimeBackend, NativeRuntimePlatform,
-        evaluate_native_runtime_artifact,
+        CudaRuntimeRequirements, HostCudaProfile, HostRocmProfile, NativeRuntimeBackend,
+        NativeRuntimePlatform, evaluate_native_runtime_artifact,
     };
     use std::collections::BTreeSet;
 
@@ -393,11 +434,13 @@ mod tests {
     #[test]
     fn a_vulkan_icd_beside_cuda_without_a_vulkan_runtime_is_not_a_second_gpu() {
         // A Jetson with vulkan-tools: Vulkan is detected, but no linux/aarch64
-        // Vulkan runtime exists, so only the CUDA side is worth naming.
+        // Vulkan runtime exists, and the only GPU is the CUDA one, so only the
+        // CUDA side is worth naming.
         let mut profile = cuda12_host();
         profile
             .available_flavors
             .insert(NativeRuntimeBackendKind::Vulkan);
+        profile.gpus = vec![gpu("NVIDIA Tegra Orin (nvgpu)", None)];
         let cpu = artifact("cpu", NativeRuntimeBackend::cpu(), "aarch64");
         let artifacts = [cpu.clone(), artifact("cuda13", cuda(13), "aarch64")];
         let evaluated = evaluate(&artifacts, &profile);
@@ -415,6 +458,98 @@ mod tests {
             line.starts_with("cuda GPU detected, but its runtimes don't fit: cuda13 ("),
             "{line}"
         );
+    }
+
+    fn gpu(name: &str, cuda_sm: Option<&str>) -> HostGpuProfile {
+        HostGpuProfile {
+            display_name: name.to_string(),
+            cuda_sm: cuda_sm.map(str::to_string),
+            ..HostGpuProfile::default()
+        }
+    }
+
+    /// The warning for a CUDA host that also has Vulkan, with these GPUs and
+    /// no Vulkan runtime.
+    fn cuda_and_vulkan_warning(gpus: Vec<HostGpuProfile>) -> String {
+        let mut profile = cuda12_host();
+        profile
+            .available_flavors
+            .insert(NativeRuntimeBackendKind::Vulkan);
+        profile.gpus = gpus;
+        let cpu = artifact("cpu", NativeRuntimeBackend::cpu(), "aarch64");
+        let evaluated = evaluate(std::slice::from_ref(&cpu), &profile);
+        let unused = unused_gpu_backends(
+            &evaluated,
+            &[],
+            &profile,
+            &RuntimeSelection::Recommended,
+            &cpu,
+        );
+        describe_unused_gpu_backends(&unused).unwrap()
+    }
+
+    #[test]
+    fn another_gpu_beside_cuda_keeps_vulkan_in_the_warning() {
+        // A laptop with an NVIDIA GPU and an Intel one: Vulkan may be the
+        // Intel GPU, which no CUDA runtime would use.
+        let line = cuda_and_vulkan_warning(vec![
+            gpu("NVIDIA GeForce RTX 4060 Laptop GPU", Some("8.9")),
+            gpu("Intel(R) UHD Graphics 770", None),
+        ]);
+
+        assert!(line.starts_with("GPU detected (cuda, vulkan)"), "{line}");
+    }
+
+    #[test]
+    fn a_jetson_listed_by_nvidia_smi_is_the_cuda_gpu() {
+        // nvidia-smi may name the Orin without "NVIDIA" and report no compute
+        // capability; its CUDA device still identifies it.
+        let line = cuda_and_vulkan_warning(vec![HostGpuProfile {
+            display_name: "Orin (nvgpu)".to_string(),
+            backend_device: Some("CUDA0".to_string()),
+            ..HostGpuProfile::default()
+        }]);
+
+        assert!(line.starts_with("cuda GPU detected"), "{line}");
+    }
+
+    #[test]
+    fn an_amd_apu_beside_an_nvidia_gpu_keeps_vulkan_without_rocm() {
+        // A Ryzen laptop with an NVIDIA GPU: the "AMD" label adds a ROCm
+        // flavor, but nothing says ROCm is there, so the APU's path is Vulkan.
+        let mut profile = cuda12_host();
+        profile.available_flavors.extend([
+            NativeRuntimeBackendKind::Rocm,
+            NativeRuntimeBackendKind::Vulkan,
+        ]);
+        profile.rocm = Some(HostRocmProfile::default());
+        profile.gpus = vec![
+            gpu("NVIDIA GeForce RTX 4060 Laptop GPU", Some("8.9")),
+            gpu("AMD Radeon 780M", None),
+        ];
+        let cpu = artifact("cpu", NativeRuntimeBackend::cpu(), "aarch64");
+        let evaluated = evaluate(std::slice::from_ref(&cpu), &profile);
+        let unused = unused_gpu_backends(
+            &evaluated,
+            &[],
+            &profile,
+            &RuntimeSelection::Recommended,
+            &cpu,
+        );
+
+        assert!(
+            unused
+                .iter()
+                .any(|backend| backend.backend == NativeRuntimeBackendKind::Vulkan),
+            "{unused:?}"
+        );
+    }
+
+    #[test]
+    fn vulkan_stays_in_the_warning_when_no_gpu_was_identified() {
+        let line = cuda_and_vulkan_warning(Vec::new());
+
+        assert!(line.starts_with("GPU detected (cuda, vulkan)"), "{line}");
     }
 
     #[test]
