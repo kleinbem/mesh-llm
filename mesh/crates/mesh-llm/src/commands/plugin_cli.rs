@@ -357,4 +357,58 @@ mod tests {
 
         assert!(err.to_string().contains("installed but not runnable"));
     }
+
+
+    // THROWAWAY stack probe, not for a PR: finds the smallest thread stack
+    // that the CLI parse and the overflowing test need, by re-running this
+    // test as a child with a given stack size.
+    fn stack_probe_case(case: &str) {
+        match case {
+            "parse" => {
+                let temp = TempDir::new().unwrap();
+                let _ = std::hint::black_box(cli_with_missing_config(&temp));
+            }
+            "test" => resolves_installed_cli_plugin_when_not_configured(),
+            other => panic!("unknown case {other}"),
+        }
+    }
+
+    #[test]
+    fn stack_probe() {
+        if let Ok(spec) = env::var("STACK_PROBE") {
+            let (case, bytes) = spec.split_once(':').unwrap();
+            let case = case.to_string();
+            let bytes: usize = bytes.parse().unwrap();
+            std::thread::Builder::new()
+                .stack_size(bytes)
+                .spawn(move || stack_probe_case(&case))
+                .unwrap()
+                .join()
+                .unwrap();
+            return;
+        }
+        let exe = env::current_exe().unwrap();
+        let fits = |case: &str, bytes: usize| {
+            std::process::Command::new(&exe)
+                .args(["commands::plugin_cli::tests::stack_probe", "--exact", "--test-threads=1"])
+                .env("STACK_PROBE", format!("{case}:{bytes}"))
+                .env_remove("RUST_MIN_STACK")
+                .output()
+                .unwrap()
+                .status
+                .success()
+        };
+        let step = 16 * 1024;
+        let mut report = Vec::new();
+        for case in ["parse", "test"] {
+            let (mut lo, mut hi) = (step, 32 * 1024 * 1024);
+            assert!(fits(case, hi), "{case} fails even with {hi} bytes");
+            while hi - lo > step {
+                let mid = (lo + hi) / 2 / step * step;
+                if fits(case, mid) { hi = mid } else { lo = mid }
+            }
+            report.push(format!("{case}: needs {} KiB (fails at {} KiB)", hi / 1024, lo / 1024));
+        }
+        panic!("STACK PROBE {} | {}", std::env::consts::OS, report.join(" | "));
+    }
 }
