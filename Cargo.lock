@@ -4752,6 +4752,7 @@ dependencies = [
  "hex",
  "httparse",
  "iroh",
+ "libc",
  "mesh-llm-identity",
  "mesh-llm-membership",
  "mesh-llm-protocol",
@@ -4986,6 +4987,7 @@ dependencies = [
  "skippy-package-format",
  "skippy-protocol",
  "skippy-runtime",
+ "skippy-runtime-install",
  "skippy-serving",
  "skippy-topology",
  "socket2",
@@ -5289,7 +5291,6 @@ name = "mesh-llm-system"
 version = "0.78.0"
 dependencies = [
  "anyhow",
- "chrono",
  "clap",
  "dirs",
  "hex",
