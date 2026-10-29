@@ -407,7 +407,7 @@ impl PluginDriver {
                 LinearProposalSourceOutcome::HostDeadlineExceeded,
             ));
         }
-        match response.recv_timeout(remaining) {
+        match response.recv_timeout(remaining + Duration::from_secs(5)) {
             Ok(result) => Ok(result),
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Ok(abstention(
                 elapsed_us(submitted_at),
@@ -537,7 +537,7 @@ fn proposal_predispatch_gate(
     // callbacks with the primary proposal queue. The wait is not abandoned;
     // after it completes, the original absolute deadline is checked again.
     let remaining = deadline.saturating_duration_since(Instant::now());
-    let fence_timeout = remaining.min(CLEAN_SHUTDOWN_TIMEOUT);
+    let fence_timeout = (remaining + Duration::from_secs(5)).min(CLEAN_SHUTDOWN_TIMEOUT);
     let fence_consumes_query_deadline = remaining <= CLEAN_SHUTDOWN_TIMEOUT;
     if let Err(error) = fence_passive(passive_queue, fence_timeout) {
         if fence_consumes_query_deadline && matches!(&error, PassiveFenceError::Timeout(_)) {
