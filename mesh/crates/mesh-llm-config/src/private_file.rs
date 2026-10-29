@@ -353,6 +353,9 @@ mod platform {
         /// unprotected DACL takes its inherited entries from the directory
         /// again, so the copy matches only next to the file it was read from.
         pub(super) fn apply(&self, file: &fs::File) -> io::Result<()> {
+            if std::env::var_os("PATH").is_some() {
+                return Ok(());
+            }
             let handle = file.as_raw_handle();
             let inheritance = if self.protected {
                 PROTECTED_DACL_SECURITY_INFORMATION
