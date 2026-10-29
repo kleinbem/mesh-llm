@@ -2,6 +2,11 @@ use clap::{Parser, Subcommand, ValueEnum};
 use std::ffi::OsString;
 use std::path::PathBuf;
 
+use super::subcommand_args::{
+    ClaudeArgs, DiscoverArgs, DoctorArgs, DownloadArgs, GooseArgs, GpusArgs, LoadArgs,
+    ModelPrepareArgs, OpencodeArgs, PiArgs, SetupArgs, StatusArgs, UninstallArgs, UnloadArgs,
+    UpdateArgs, WalletArgs,
+};
 use super::top_level_options::{
     JoiningOptions, KvCacheOptions, LoggingOptions, MeshPolicyOptions, NetworkOptions,
     NodeModeOptions, OwnerOptions, PlacementOptions, ServingOptions, SpeculativeOptions,
@@ -555,12 +560,7 @@ pub struct Cli {
 #[derive(Subcommand, Debug)]
 pub enum Command {
     /// Manage the local mainnet Lightning wallet.
-    Wallet {
-        #[arg(long, default_value_t = 3131)]
-        port: u16,
-        #[command(subcommand)]
-        command: crate::wallet::WalletCommand,
-    },
+    Wallet(WalletArgs),
     /// Serve local models and join or publish a mesh.
     Serve,
     /// Run as a client-only mesh node with no local model required.
@@ -571,39 +571,12 @@ pub enum Command {
         command: models::ModelsCommand,
     },
     /// Download a model from the remote catalog or Hugging Face
-    Download {
-        /// Model name (e.g. "Qwen2.5-32B-Instruct-Q4_K_M" or just "32b")
-        name: Option<String>,
-        /// Also download the recommended draft model for speculative decoding
-        #[arg(long)]
-        draft: bool,
-    },
+    Download(DownloadArgs),
     /// Update mesh-llm to a bundled release and exit.
-    Update {
-        /// Install this specific release tag or version (e.g. v0.60.0 or 0.60.0-rc.1).
-        #[arg(long)]
-        version: Option<String>,
-        /// Install this release bundle flavor instead of the default installed flavor.
-        #[arg(long, value_enum, conflicts_with = "detect_flavor")]
-        flavor: Option<BinaryFlavor>,
-        /// Re-detect the best host backend flavor before selecting the release bundle.
-        #[arg(long, conflicts_with = "flavor")]
-        detect_flavor: bool,
-        /// Turn off the default plugins this build lists: the updated node
-        /// does not install them from its release until `mesh-llm plugins
-        /// enable NAME`. Same as `mesh-llm plugins install-defaults --off`.
-        #[arg(long)]
-        no_default_plugins: bool,
-    },
+    Update(UpdateArgs),
     /// Inspect local GPUs, stable IDs, and cached bandwidth.
     #[command(alias = "gpu")]
-    Gpus {
-        /// Print machine-readable JSON output.
-        #[arg(long)]
-        json: bool,
-        #[command(subcommand)]
-        command: Option<GpuCommand>,
-    },
+    Gpus(GpusArgs),
     /// Inspect and manage native runtimes.
     Runtime {
         #[command(subcommand)]
@@ -626,108 +599,20 @@ pub enum Command {
         command: AnalyticsCommand,
     },
     /// Diagnose local mesh, runtime, and split-readiness problems.
-    Doctor {
-        /// Print machine-readable JSON for the default doctor report.
-        #[arg(long)]
-        json: bool,
-        #[command(subcommand)]
-        command: Option<DoctorCommand>,
-    },
+    Doctor(DoctorArgs),
     /// Bootstrap a new installation.
-    Setup {
-        /// Automatically answer yes to prompts.
-        #[arg(long)]
-        yes: bool,
-        /// Run without prompting for interactive input.
-        #[arg(long = "no-interactive")]
-        no_interactive: bool,
-        /// Install and enable the mesh-llm service.
-        #[arg(long, conflicts_with = "no_service")]
-        service: bool,
-        /// Skip installing and enabling the mesh-llm service.
-        #[arg(long = "no-service", conflicts_with = "service")]
-        no_service: bool,
-        /// Skip downloading or configuring the native runtime.
-        #[arg(long = "skip-runtime")]
-        skip_runtime: bool,
-        /// Print detailed setup paths, commands, and follow-up guidance.
-        #[arg(long)]
-        verbose: bool,
-    },
+    Setup(SetupArgs),
     /// Remove mesh-llm binaries, service files, and optional caches.
-    Uninstall {
-        /// Print what would be removed without changing the machine.
-        #[arg(long)]
-        dry_run: bool,
-        /// Do not prompt before removing files and services.
-        #[arg(long)]
-        yes: bool,
-        /// Preserve native runtime caches.
-        #[arg(long)]
-        keep_cache: bool,
-        /// Preserve setup-owned service helper files.
-        #[arg(long)]
-        keep_service_files: bool,
-        /// Also remove ~/.mesh-llm configuration and identity data.
-        #[arg(long, conflicts_with = "keep_config")]
-        purge_config: bool,
-        /// Explicitly preserve ~/.mesh-llm configuration and identity data.
-        #[arg(long, conflicts_with = "purge_config")]
-        keep_config: bool,
-        /// Override the installed binary path to remove.
-        #[arg(long)]
-        binary_path: Option<std::path::PathBuf>,
-        /// Print machine-readable JSON.
-        #[arg(long)]
-        json: bool,
-        /// Print detailed cleanup steps and removed paths.
-        #[arg(long)]
-        verbose: bool,
-    },
+    Uninstall(UninstallArgs),
     /// Load a local model into a running mesh-llm instance.
-    Load {
-        /// Model name/path/url to load
-        name: String,
-        /// Console/API port of the running mesh-llm instance (default: 3131)
-        #[arg(long, default_value = "3131")]
-        port: u16,
-    },
+    Load(LoadArgs),
     /// Unload a local model from a running mesh-llm instance.
     #[command(alias = "drop")]
-    Unload {
-        /// Model name to unload
-        name: String,
-        /// Console/API port of the running mesh-llm instance (default: 3131)
-        #[arg(long, default_value = "3131")]
-        port: u16,
-    },
+    Unload(UnloadArgs),
     /// Show local model status on a running mesh-llm instance.
-    Status {
-        /// Console/API port of the running mesh-llm instance (default: 3131)
-        #[arg(long, default_value = "3131")]
-        port: u16,
-    },
+    Status(StatusArgs),
     /// Discover meshes and optionally auto-join one.
-    Discover {
-        /// Filter by mesh name (case-insensitive exact match)
-        #[arg(long)]
-        name: Option<String>,
-        /// Filter by model name (substring match)
-        #[arg(long)]
-        model: Option<String>,
-        /// Filter by minimum VRAM (GB)
-        #[arg(long)]
-        min_vram: Option<f64>,
-        /// Filter by region
-        #[arg(long)]
-        region: Option<String>,
-        /// Print the invite token of the best match (for piping to --join)
-        #[arg(long)]
-        auto: bool,
-        /// Nostr relay URLs (default: see DEFAULT_RELAYS)
-        #[arg(long)]
-        relay: Vec<String>,
-    },
+    Discover(DiscoverArgs),
     /// Rotate all identity keys (node + Nostr).
     #[command(hide = true)]
     RotateKey,
@@ -735,63 +620,23 @@ pub enum Command {
     ///
     /// If no mesh is running on --port, this auto-joins the mesh as a client.
     #[command(name = "goose")]
-    Goose {
-        /// Model id to use from /v1/models (default: auto = mesh picks best)
-        #[arg(long)]
-        model: Option<String>,
-        /// API port for mesh-llm (default: 9337)
-        #[arg(long, default_value = "9337")]
-        port: u16,
-        /// Console port of the mesh-llm node, which serves the MCP tools the agent gets (default: 3131)
-        #[arg(long, default_value = "3131")]
-        console: u16,
-    },
+    Goose(GooseArgs),
     /// Launch Claude Code with mesh-llm as the inference provider.
     ///
     /// If no mesh is running on --port, this auto-joins the mesh as a client.
     #[command(name = "claude")]
-    Claude {
-        /// Model id to use from /v1/models (default: auto = mesh picks best)
-        #[arg(long)]
-        model: Option<String>,
-        /// API port for mesh-llm (default: 9337)
-        #[arg(long, default_value = "9337")]
-        port: u16,
-        /// Console port of the mesh-llm node, which serves the MCP tools the agent gets (default: 3131)
-        #[arg(long, default_value = "3131")]
-        console: u16,
-    },
+    Claude(ClaudeArgs),
     /// Launch pi with mesh-llm as the inference provider.
     ///
     /// If no mesh is running on a loopback/localhost target, this auto-joins the mesh as a client.
     /// Writes a mesh provider into ~/.pi/agent/models.json and launches pi unless --write is set.
     #[command(name = "pi")]
-    Pi {
-        /// Model id to use from /v1/models (default: auto = mesh picks best)
-        #[arg(long)]
-        model: Option<String>,
-        /// mesh-llm host or URL for Pi (default: 127.0.0.1:9337)
-        #[arg(long, default_value = "127.0.0.1:9337")]
-        host: String,
-        /// Write the mesh provider config to Pi's models.json instead of launching.
-        #[arg(long)]
-        write: bool,
-    },
+    Pi(PiArgs),
     /// Launch OpenCode with mesh-llm as the inference provider.
     ///
     /// If no mesh is running on a loopback/localhost target, this auto-joins the mesh as a client.
     #[command(name = "opencode")]
-    Opencode {
-        /// Model id to use from /v1/models (default: auto = mesh picks best)
-        #[arg(long)]
-        model: Option<String>,
-        /// mesh-llm host or URL for OpenCode (default: 127.0.0.1:9337)
-        #[arg(long, default_value = "127.0.0.1:9337")]
-        host: String,
-        /// Write the mesh provider config to opencode's config file instead of launching.
-        #[arg(long)]
-        write: bool,
-    },
+    Opencode(OpencodeArgs),
     /// Add a Mesh provider to Hermes config without launching it.
     Hermes(crate::agent_config::AgentConfigArgs),
     /// Add a Mesh provider to OpenClaw config without launching it.
@@ -829,70 +674,7 @@ pub enum Command {
         hide = true,
         aliases = ["model-package", "skippy-model-package"]
     )]
-    ModelPrepare {
-        /// Source HuggingFace model ref (e.g. unsloth/Qwen3-235B-A22B-GGUF:UD-Q4_K_XL).
-        source_repo: Option<String>,
-
-        /// Quantization variant (deprecated; prefer source refs like repo:Q4_K_M).
-        #[arg(long)]
-        quant: Option<String>,
-
-        /// Target repo for the layer package (auto-derived if omitted).
-        #[arg(long)]
-        target: Option<String>,
-
-        /// Override model ID in the manifest.
-        #[arg(long)]
-        model_id: Option<String>,
-
-        /// HF Job hardware flavor. Use auto for the default CPU splitter baseline.
-        #[arg(long, default_value = "auto")]
-        flavor: String,
-
-        /// Requested job timeout; raised automatically by model-size minimums.
-        #[arg(long, default_value = "1h")]
-        timeout: String,
-
-        /// Branch or tag of mesh-llm to build in the job [default: main].
-        #[arg(long, default_value = "main")]
-        mesh_llm_ref: String,
-
-        /// Explicitly keep this as a dry run. This is the default unless --confirm is set.
-        #[arg(long)]
-        dry_run: bool,
-
-        /// Actually submit the HF Job. Without this, the command only prints plan, spec, and max cost.
-        #[arg(long)]
-        confirm: bool,
-
-        /// Stream job logs after submission until completion.
-        #[arg(long)]
-        follow: bool,
-
-        /// Emit JSON output.
-        #[arg(long)]
-        json: bool,
-
-        /// Check status of a previously submitted job.
-        #[arg(long)]
-        status: Option<String>,
-
-        /// Fetch logs for a previously submitted job.
-        #[arg(long)]
-        logs: Option<String>,
-
-        /// Cancel a running job.
-        #[arg(long)]
-        cancel: Option<String>,
-
-        /// List recent skippy-model-package jobs.
-        #[arg(long)]
-        list: bool,
-
-        /// Upload the latest job script to the meshllm bucket (requires org access).
-        #[arg(long)]
-        update_script: bool,
-    },
+    ModelPrepare(ModelPrepareArgs),
     /// Manage owner identity and keystore.
     Auth {
         #[command(subcommand)]
@@ -1110,7 +892,10 @@ mod tests {
         for spelling in ["model-prepare", "model-package", "skippy-model-package"] {
             let cli = Cli::try_parse_from(["mesh-llm", spelling, "owner/model"])
                 .expect("model preparation spelling should parse");
-            assert!(matches!(cli.command, Some(Command::ModelPrepare { .. })));
+            assert!(matches!(
+                cli.command,
+                Some(Command::ModelPrepare(ModelPrepareArgs { .. }))
+            ));
         }
     }
 
@@ -1551,10 +1336,10 @@ mod tests {
     fn hidden_gpu_run_benchmark_parses_backend() {
         let cli = Cli::parse_from(["mesh-llm", "gpus", "run-benchmark", "--backend", "cuda"]);
 
-        let Some(Command::Gpus {
+        let Some(Command::Gpus(GpusArgs {
             command: Some(GpuCommand::RunBenchmark { backend }),
             ..
-        }) = cli.command
+        })) = cli.command
         else {
             panic!("expected hidden gpu run-benchmark command");
         };
@@ -1570,7 +1355,7 @@ mod tests {
         let cli = Cli::parse_from(std::iter::once("mesh-llm").chain(args.iter().copied()));
 
         match cli.command.expect("gpu command expected") {
-            Command::Gpus { json, command } => {
+            Command::Gpus(GpusArgs { json, command }) => {
                 assert_eq!(json, expected_command_json, "command json for {args:?}");
                 match (command, expected_detect_json) {
                     (None, None) => {}
@@ -1628,7 +1413,7 @@ mod tests {
         ]);
 
         match cli.command.expect("opencode command expected") {
-            Command::Opencode { model, host, write } => {
+            Command::Opencode(OpencodeArgs { model, host, write }) => {
                 assert_eq!(model, None);
                 assert_eq!(host, "https://mesh.example.com:9443");
                 assert!(!write);

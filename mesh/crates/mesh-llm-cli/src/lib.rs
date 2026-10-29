@@ -18,13 +18,15 @@ pub use inventory::{
 };
 
 pub use parser::{
-    AnalyticsCommand, AuthCommand, BinaryFlavor, Cli, Command, ConfigCommand, DiscoveryScope,
-    DoctorCommand, GpuCommand, JoiningOptions, KvCacheCommand, KvCacheOptions, LoggingOptions,
-    MeshDiscoveryMode, MeshGuardrailCliMode, MeshPolicyOptions, NetworkOptions, NodeModeOptions,
-    NormalizedRuntimeArgs, OwnerOptions, PlacementOptions, PluginCommand, RuntimeSurface,
-    ServingOptions, ServingStrategyCli, SkillAgentArg, SkillCommand, SpeculativeOptions,
-    TrustCommand, TrustPolicy, legacy_runtime_surface_warning, normalize_runtime_surface_args,
-    raw_args_invoke_analytics, validate_discovery_mode_args,
+    AnalyticsCommand, AuthCommand, BinaryFlavor, ClaudeArgs, Cli, Command, ConfigCommand,
+    DiscoverArgs, DiscoveryScope, DoctorArgs, DoctorCommand, DownloadArgs, GooseArgs, GpuCommand,
+    GpusArgs, JoiningOptions, KvCacheCommand, KvCacheOptions, LoadArgs, LoggingOptions,
+    MeshDiscoveryMode, MeshGuardrailCliMode, MeshPolicyOptions, ModelPrepareArgs, NetworkOptions,
+    NodeModeOptions, NormalizedRuntimeArgs, OpencodeArgs, OwnerOptions, PiArgs, PlacementOptions,
+    PluginCommand, RuntimeSurface, ServingOptions, ServingStrategyCli, SetupArgs, SkillAgentArg,
+    SkillCommand, SpeculativeOptions, StatusArgs, TrustCommand, TrustPolicy, UninstallArgs,
+    UnloadArgs, UpdateArgs, WalletArgs, legacy_runtime_surface_warning,
+    normalize_runtime_surface_args, raw_args_invoke_analytics, validate_discovery_mode_args,
 };
 
 pub mod wallet;
