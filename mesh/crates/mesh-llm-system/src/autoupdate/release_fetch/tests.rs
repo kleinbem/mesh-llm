@@ -704,3 +704,102 @@ fn test_staged_binary_version_must_match_release() {
     );
     let _ = std::fs::remove_dir_all(dir);
 }
+
+// Scratch stress test (not for upstream): repeats the steps of
+// test_staged_binary_version_must_match_release while other threads spawn
+// processes, as other tests do in a parallel run. Phase 1 runs them as the test
+// does; phase 2 retries the start on ExecutableFileBusy (50 ms, up to 100 times).
+#[cfg(unix)]
+#[test]
+#[ignore]
+fn stress_staged_binary_version_text_file_busy() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::sync::Arc;
+
+    fn busy(err: &anyhow::Error) -> bool {
+        err.chain().any(|cause| {
+            cause
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|io| io.kind() == std::io::ErrorKind::ExecutableFileBusy)
+        })
+    }
+
+    let iterations: u32 = std::env::var("STRESS_ITERATIONS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(2000);
+    let spawners: usize = std::env::var("STRESS_SPAWNERS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(8);
+    let stop = Arc::new(AtomicBool::new(false));
+    let spawned = Arc::new(AtomicU64::new(0));
+    let threads: Vec<_> = (0..spawners)
+        .map(|_| {
+            let stop = stop.clone();
+            let spawned = spawned.clone();
+            std::thread::spawn(move || {
+                while !stop.load(Ordering::Relaxed) {
+                    let _ = std::process::Command::new("true").status();
+                    spawned.fetch_add(1, Ordering::Relaxed);
+                }
+            })
+        })
+        .collect();
+
+    let dir = temp_dir("self-update-version-stress");
+    let binary = dir.join(mesh_binary_name());
+    let stage = || {
+        let _ = std::fs::remove_file(&binary);
+        std::fs::write(&binary, "#!/bin/sh\necho 'mesh-llm 0.68.0'\n").unwrap();
+        let mut permissions = std::fs::metadata(&binary).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&binary, permissions).unwrap();
+    };
+
+    let (mut plain_busy, mut plain_other) = (0u32, 0u32);
+    for _ in 0..iterations {
+        stage();
+        match verify_staged_mesh_binary_version(&dir, "0.68.0") {
+            Ok(()) => {}
+            Err(err) if busy(&err) => plain_busy += 1,
+            Err(err) => {
+                plain_other += 1;
+                eprintln!("other error: {err:#}");
+            }
+        }
+    }
+
+    let (mut retry_failed, mut retries, mut max_retries) = (0u32, 0u32, 0u32);
+    for _ in 0..iterations {
+        stage();
+        let mut attempt = 0;
+        loop {
+            match verify_staged_mesh_binary_version(&dir, "0.68.0") {
+                Ok(()) => break,
+                Err(err) if busy(&err) && attempt < 100 => {
+                    attempt += 1;
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+                Err(err) => {
+                    retry_failed += 1;
+                    eprintln!("failed with retry: {err:#}");
+                    break;
+                }
+            }
+        }
+        retries += attempt;
+        max_retries = max_retries.max(attempt);
+    }
+
+    stop.store(true, Ordering::Relaxed);
+    for thread in threads {
+        thread.join().unwrap();
+    }
+    let _ = std::fs::remove_dir_all(dir);
+    println!(
+        "STRESS iterations={iterations} spawners={spawners} spawned={} | as the test does: text_file_busy={plain_busy} other_errors={plain_other} | with retry: failed={retry_failed} retries={retries} max_retries_per_run={max_retries}",
+        spawned.load(Ordering::Relaxed)
+    );
+}
