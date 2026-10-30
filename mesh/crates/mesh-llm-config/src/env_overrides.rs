@@ -109,9 +109,7 @@ pub(crate) fn config_path_override() -> Option<std::path::PathBuf> {
 fn resolve_config_path_override(
     environment: Option<std::ffi::OsString>,
 ) -> Option<std::path::PathBuf> {
-    environment
-        .filter(|path| !path.is_empty())
-        .map(std::path::PathBuf::from)
+    environment.map(std::path::PathBuf::from)
 }
 
 /// Applies every declared `MESH_LLM_*` config environment override to

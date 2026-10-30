@@ -133,12 +133,12 @@ fn runtime_root_from(
     home: Option<PathBuf>,
 ) -> Result<PathBuf> {
     // 1. Explicit override — always wins (also used by tests to avoid touching ~)
-    if let Some(root) = runtime_root.filter(|root| !root.is_empty()) {
+    if let Some(root) = runtime_root {
         return Ok(PathBuf::from(root));
     }
 
     // 2. XDG_RUNTIME_DIR (standard on modern Linux)
-    if let Some(xdg) = xdg_runtime_dir.filter(|xdg| !xdg.is_empty()) {
+    if let Some(xdg) = xdg_runtime_dir {
         return Ok(PathBuf::from(xdg).join("mesh-llm").join("runtime"));
     }
 

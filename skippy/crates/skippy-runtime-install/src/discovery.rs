@@ -29,9 +29,7 @@ pub fn discover_native_runtime_bundle_dirs(
 fn environment_bundle_dirs(value: Option<std::ffi::OsString>) -> Vec<PathBuf> {
     value
         .map(|value| {
-            env::split_paths(&value)
-                .filter(|dir| !dir.as_os_str().is_empty())
-                .collect()
+            env::split_paths(&value).collect()
         })
         .unwrap_or_default()
 }

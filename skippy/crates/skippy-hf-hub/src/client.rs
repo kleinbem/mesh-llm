@@ -266,7 +266,7 @@ impl HFClientBuilder {
     pub fn build(self) -> HFResult<HFClient> {
         let endpoint = self
             .endpoint
-            .or_else(|| constants::env_value(constants::HF_ENDPOINT))
+            .or_else(|| std::env::var(constants::HF_ENDPOINT).ok())
             .unwrap_or_else(|| constants::DEFAULT_HF_ENDPOINT.to_string());
 
         let _ = url::Url::parse(&endpoint)?;
@@ -601,7 +601,7 @@ fn resolve_token() -> Option<String> {
         return Some(token);
     }
 
-    if let Some(path) = constants::env_value(constants::HF_TOKEN_PATH)
+    if let Ok(path) = std::env::var(constants::HF_TOKEN_PATH)
         && let Ok(token) = std::fs::read_to_string(&path)
     {
         let token = token.trim().to_string();

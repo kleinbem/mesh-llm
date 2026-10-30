@@ -471,7 +471,7 @@ fn store_root_from(
     plugin_dir: Option<std::ffi::OsString>,
     home: Option<PathBuf>,
 ) -> Result<PathBuf> {
-    if let Some(path) = plugin_dir.filter(|path| !path.is_empty()) {
+    if let Some(path) = plugin_dir {
         return Ok(PathBuf::from(path));
     }
     let home = home.context("Cannot determine home directory")?;

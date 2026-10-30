@@ -236,7 +236,7 @@ where
     // 1. MESH_LLM_DATA_DIR env var (highest priority, used by skippy-model-hf crate,
     //    which also treats an empty value as unset)
     // 2. platform default
-    if let Some(env_path) = data_dir.filter(|path| !path.is_empty()) {
+    if let Some(env_path) = data_dir {
         return Ok(PathBuf::from(env_path).join("logging"));
     }
 
