@@ -8,6 +8,7 @@ use crate::runtime::split_planning::RuntimeSliceStagePlan;
 use crate::runtime::survey;
 use crate::{mesh::NodeRole, plugin};
 use iroh::SecretKey;
+use mesh_llm_skippy_adapter::config::DFLASH_DRAFT_CONTEXT_AVAILABLE;
 use sha2::{Digest, Sha256};
 use skippy_protocol::{FlashAttentionType, LoadMode};
 use std::fs;
@@ -768,17 +769,22 @@ async fn split_load_of_a_paired_native_mtp_target_keeps_native_mtp() {
         .await
         .expect("split settings should resolve");
 
-    // Without a copy here the final stage still receives the pinned source,
-    // so it starts its own download on this first load, and loads with the
-    // native MTP the draft replaced in case it has no draft.
-    let plan = settings
-        .split_dflash
-        .clone()
-        .expect("an uncached default still travels to the final stage");
-    assert!(plan.draft_source.is_some());
-    assert!(plan.target_layers.is_empty());
-    assert_eq!(plan.draft_model_path, None);
-    assert!(settings.final_stage_native_mtp());
+    if DFLASH_DRAFT_CONTEXT_AVAILABLE {
+        // Without a copy here the final stage still receives the pinned source,
+        // so it starts its own download on this first load, and loads with the
+        // native MTP the draft replaced in case it has no draft.
+        let plan = settings
+            .split_dflash
+            .clone()
+            .expect("an uncached default still travels to the final stage");
+        assert!(plan.draft_source.is_some());
+        assert!(plan.target_layers.is_empty());
+        assert_eq!(plan.draft_model_path, None);
+        assert!(settings.final_stage_native_mtp());
+    } else {
+        // No default draft on this build: nothing travels to the final stage.
+        assert!(settings.split_dflash.is_none());
+    }
 
     // The final stage reports no draft: stage 0 keeps native MTP.
     let mut unreadable = split_generation_load_settings_with(&spec, SplitDefaultDraft::Uncached)
@@ -887,6 +893,16 @@ async fn a_final_stage_with_its_own_draft_copy_settles_split_dflash() {
         &["bf16".to_string(), "q8".to_string(), "q4".to_string()],
     );
 
+    if !DFLASH_DRAFT_CONTEXT_AVAILABLE {
+        // No default draft on this build: the split keeps native MTP.
+        assert!(settings.split_dflash.is_none());
+        assert_eq!(
+            settings.embedded_openai.speculative.effective_strategy,
+            "native-mtp"
+        );
+        assert!(settings.embedded_openai.native_mtp_enabled);
+        return;
+    }
     let plan = settings
         .split_dflash
         .clone()
@@ -1008,6 +1024,16 @@ async fn split_load_of_a_cataloged_target_serves_its_default_dflash_draft() {
             .await
             .expect("split settings should resolve");
 
+    if !DFLASH_DRAFT_CONTEXT_AVAILABLE {
+        // No default draft on this build: the split keeps native MTP.
+        assert!(settings.split_dflash.is_none());
+        assert_eq!(
+            settings.embedded_openai.speculative.effective_strategy,
+            "native-mtp"
+        );
+        assert!(settings.embedded_openai.native_mtp_enabled);
+        return;
+    }
     assert_eq!(
         settings.embedded_openai.speculative.effective_strategy,
         "dflash"

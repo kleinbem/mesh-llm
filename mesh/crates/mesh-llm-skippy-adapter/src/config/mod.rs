@@ -44,5 +44,8 @@ pub use resolution::{
     resolve_embedded_request_defaults, resolve_skippy_config_for_selector,
     resolve_skippy_config_for_selector_with_publisher_defaults,
 };
+// Tests of other crates follow the build's default; it isn't a product setting.
+#[cfg(any(test, feature = "test-support"))]
+pub use dflash::DFLASH_DRAFT_CONTEXT_AVAILABLE;
 pub use support::effective_safety_margin_bytes;
 pub use types::{ResolvedEmbeddedOpenAiArgs, ResolvedSkippyConfig, SkippyConfigResolveRequest};

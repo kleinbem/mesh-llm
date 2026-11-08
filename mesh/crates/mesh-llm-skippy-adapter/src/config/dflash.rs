@@ -68,7 +68,7 @@ pub(super) fn select_dflash_draft<'a>(
 /// off there until the recurrent state of every lane is in the memory plan
 /// (#2318): a known target on Windows keeps native MTP or plain decoding, and
 /// an explicitly configured draft still attaches.
-pub(super) const DFLASH_DRAFT_CONTEXT_AVAILABLE: bool = !cfg!(windows);
+pub const DFLASH_DRAFT_CONTEXT_AVAILABLE: bool = !cfg!(windows);
 
 /// What else the resolver decided that keeps a known DFlash pairing from
 /// being the default.
