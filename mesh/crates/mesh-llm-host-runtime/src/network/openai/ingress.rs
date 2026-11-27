@@ -25,7 +25,7 @@ mod lifecycle_prepared_dispatch_live_tests;
 #[path = "ingress/typed_frontend_live_tests.rs"]
 mod lifecycle_typed_frontend_live_tests;
 mod missing_model;
-mod plugin_gpu_handoff;
+pub(super) mod plugin_gpu_handoff;
 #[cfg(test)]
 #[path = "ingress/private_scope_tests.rs"]
 mod private_scope_tests;
@@ -790,13 +790,6 @@ async fn route_to_plugin_endpoint(
     model_name: &str,
     route_observer: OpenAiRouteObserver<'_>,
 ) -> proxy::RouteDispatchOutcome {
-    let _gpu_handoff =
-        match plugin_gpu_handoff::acquire_for_plugin(ctx.node, &endpoint.plugin_name, model_name)
-            .await
-        {
-            Ok(lease) => lease,
-            Err(reason) => return proxy::RouteDispatchOutcome::Failed(reason),
-        };
     let tiered_call = plugin_manager.begin_tiered_invocation(
         &endpoint.plugin_name,
         crate::mesh::request_tier::current_request_tier(),
@@ -954,18 +947,29 @@ async fn finish_plugin_response(
     outcome: proxy::RouteDispatchOutcome,
 ) -> (proxy::RouteDispatchOutcome, Option<ClientStream>) {
     if !outcome.response_written() && !matches!(outcome, proxy::RouteDispatchOutcome::Dropped(_)) {
-        (
-            response_outcome(
-                503,
-                proxy::send_503_observed(
-                    stream,
-                    &format!("plugin endpoint for model '{model_name}' failed"),
-                    observer,
-                )
-                .await,
-            ),
-            None,
-        )
+        let write_result = if matches!(
+            outcome,
+            proxy::RouteDispatchOutcome::Failed(plugin_gpu_handoff::HANDOFF_FAILED_CODE)
+        ) {
+            Box::pin(proxy::send_503_with_code_observed(
+                stream,
+                &format!(
+                    "exclusive GPU handoff failed ({}) for model '{model_name}'",
+                    plugin_gpu_handoff::HANDOFF_FAILED_CODE
+                ),
+                plugin_gpu_handoff::HANDOFF_FAILED_CODE,
+                observer,
+            ))
+            .await
+        } else {
+            proxy::send_503_observed(
+                stream,
+                &format!("plugin endpoint for model '{model_name}' failed"),
+                observer,
+            )
+            .await
+        };
+        (response_outcome(503, write_result), None)
     } else {
         (outcome, Some(stream))
     }

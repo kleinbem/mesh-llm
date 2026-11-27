@@ -237,34 +237,45 @@ impl Node {
             .try_acquire_owned()
             .context("native inference capacity exhausted")?;
         let effort = requested_effort(&call.request)?;
-        let candidates = self
+        let candidates: Vec<(String, u16, std::sync::Weak<dyn InferenceBackend>)> = self
             .native_inference
             .backends
             .read()
             .await
             .get(&call.target.serving_id)
-            .cloned()
+            .map(|instances| {
+                instances
+                    .iter()
+                    .filter(|(_, entry)| {
+                        effort_supported(entry.efforts.as_deref(), effort.as_deref())
+                    })
+                    .map(|(id, entry)| (id.clone(), entry.port, Arc::downgrade(&entry.backend)))
+                    .collect()
+            })
             .context("native model is no longer loaded on this provider")?;
-        for (instance_id, candidate) in &candidates {
-            if !effort_supported(candidate.efforts.as_deref(), effort.as_deref()) {
+        for (instance_id, port, weak_backend) in &candidates {
+            let Ok(Some(instance)) = self.begin_runtime_instance_request(*port).await else {
                 continue;
-            }
-            let Ok(Some(instance)) = self.begin_runtime_instance_request(candidate.port).await
+            };
+            // Acquire the backend only after admission so waiters parked behind
+            // an unload/handoff gate never keep a retired GPU backend alive or
+            // dispatch a retired snapshot through a reused port's guard.
+            let Some(backend) = self
+                .native_inference
+                .backends
+                .read()
+                .await
+                .get(&call.target.serving_id)
+                .and_then(|instances| instances.get(instance_id))
+                .filter(|active| {
+                    active.port == *port
+                        && weak_backend.ptr_eq(&Arc::downgrade(&active.backend))
+                        && effort_supported(active.efforts.as_deref(), effort.as_deref())
+                })
+                .map(|active| active.backend.clone())
             else {
                 continue;
             };
-            // The admission await can race unload/reload (including port
-            // reuse). Never dispatch a retired snapshot through a new load's
-            // lifecycle guard.
-            let current = self.native_inference.backends.read().await;
-            if !current
-                .get(&call.target.serving_id)
-                .and_then(|instances| instances.get(instance_id))
-                .is_some_and(|active| Arc::ptr_eq(&active.backend, &candidate.backend))
-            {
-                continue;
-            }
-            drop(current);
             let context = InferenceRequestContext::new();
             let mut request: GenerationRequest = call.request.into();
             // A private request starts no peer consultation: its hooks
@@ -273,7 +284,7 @@ impl Node {
                 skippy_inference_api::set_chat_skippy_hooks_enabled(&mut request, false);
             }
             return Ok(PreparedNativeChat {
-                backend: candidate.backend.clone(),
+                backend,
                 request,
                 _cancel: CancelNativeOnDrop(context.cancellation_token()),
                 context,

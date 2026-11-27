@@ -1353,7 +1353,15 @@ impl Node {
             return Ok(None);
         };
         let residency = match self.native_model_lifecycle.get() {
-            Some(service) => service.lease_port(port).await,
+            Some(service) => match service.lease_port(port).await {
+                crate::runtime::native_model_lifecycle::PortLease::Unmanaged => None,
+                crate::runtime::native_model_lifecycle::PortLease::Leased(lease) => Some(lease),
+                crate::runtime::native_model_lifecycle::PortLease::Retired => {
+                    return Err(crate::runtime::InstanceAdmissionError::NotAccepting {
+                        state: crate::runtime::InstanceLifecycleState::Stopped,
+                    });
+                }
+            },
             None => None,
         };
         let record = lifecycle.lock().await;

@@ -57,23 +57,24 @@ pub(in crate::network::openai) async fn route_local_attempt(
     // Skippy orders, evicts and partitions its caches by the request's class.
     let classified = mesh::request_tier::mark_class_for_local_server(prefetched, private);
     let prefetched = classified.as_deref().unwrap_or(prefetched);
-    let served_model = served_model_headers_for_mesh_peer(node, tcp_stream, model, port).await;
-    let Ok((_instance_request, mut upstream)) = acquire_local_attempt_upstream(node, port).await
-    else {
+    let Ok(mut local_upstream) = acquire_local_attempt_upstream(node, port, model).await else {
         return RouteAttemptResult::RetryableUnavailable;
     };
+    let active_port = local_upstream.port;
+    let served_model =
+        served_model_headers_for_mesh_peer(node, tcp_stream, model, active_port).await;
     let _inflight = node.begin_inflight_request();
-    let _ = upstream.set_nodelay(true);
-    if let Err(err) = forward_buffered_request(&mut upstream, prefetched).await {
+    let _ = local_upstream.stream.set_nodelay(true);
+    if let Err(err) = forward_buffered_request(&mut local_upstream.stream, prefetched).await {
         tracing::warn!(
-            "API proxy: failed to forward buffered request to local OpenAI surface on {port}: {err}"
+            "API proxy: failed to forward buffered request to local OpenAI surface on {active_port}: {err}"
         );
         return RouteAttemptResult::RetryableUnavailable;
     }
     route_local_attempt_after_forward(
         tcp_stream,
-        &mut upstream,
-        port,
+        &mut local_upstream.stream,
+        active_port,
         request_id,
         retry_policy,
         response_adapter,
@@ -102,22 +103,86 @@ async fn served_model_headers_for_mesh_peer(
     ServedModelHeaders::for_served_model(node, model, Some(port)).await
 }
 
+struct LocalAttemptUpstream {
+    port: u16,
+    _residency: Option<crate::runtime::native_model_lifecycle::RequestLease>,
+    _instance: Option<crate::runtime::InstanceRequestGuard>,
+    stream: TcpStream,
+}
+
 async fn acquire_local_attempt_upstream(
     node: &mesh::Node,
     port: u16,
-) -> Result<(Option<crate::runtime::InstanceRequestGuard>, TcpStream), ()> {
-    let instance_request = node
-        .begin_runtime_instance_request(port)
+    model: Option<&str>,
+) -> Result<LocalAttemptUpstream, ()> {
+    let managed_model = node
+        .native_model_lifecycle
+        .get()
+        .and_then(|service| service.managed_model_for(port, model));
+    if let Ok(instance_request) = node.begin_runtime_instance_request(port).await {
+        if let Ok(stream) = TcpStream::connect(format!("127.0.0.1:{port}")).await {
+            return Ok(LocalAttemptUpstream {
+                port,
+                _residency: None,
+                _instance: instance_request,
+                stream,
+            });
+        }
+        tracing::warn!("API proxy: can't reach local OpenAI surface on {port}");
+    } else {
+        tracing::debug!(port, "local runtime instance rejected new work");
+    }
+
+    // If a warm on-demand managed instance retired while waiting behind an
+    // exclusive_gpu handoff or eviction, reload it by identity and refresh the port.
+    let (Some(service), Some(managed_model)) = (node.native_model_lifecycle.get(), managed_model)
+    else {
+        return Err(());
+    };
+    // Box the cold reload path so `route_local_attempt`'s stack frame stays small
+    // on Windows debug builds (2 MiB test thread stack).
+    Box::pin(reacquire_managed_local_attempt(
+        node,
+        service,
+        &managed_model,
+    ))
+    .await
+}
+
+async fn reacquire_managed_local_attempt(
+    node: &mesh::Node,
+    service: &std::sync::Arc<crate::runtime::native_model_lifecycle::NativeModelLifecycle>,
+    managed_model: &str,
+) -> Result<LocalAttemptUpstream, ()> {
+    let lease = service
+        .acquire(managed_model)
         .await
         .map_err(|error| {
-            tracing::debug!(%error, port, "local runtime instance rejected new work");
-        })?;
-    let upstream = TcpStream::connect(format!("127.0.0.1:{port}"))
+            tracing::warn!(model = %managed_model, %error, "reacquire of retired managed model failed");
+        })?
+        .ok_or(())?;
+    let refreshed_port = service.port_for(managed_model).ok_or(())?;
+    let instance_request = crate::runtime::native_model_lifecycle::with_request_lease(
+        Some(lease.clone()),
+        node.begin_runtime_instance_request(refreshed_port),
+    )
+    .await
+    .map_err(|error| {
+        tracing::debug!(%error, port = refreshed_port, "reacquired local runtime instance rejected new work");
+    })?;
+    let stream = TcpStream::connect(format!("127.0.0.1:{refreshed_port}"))
         .await
         .map_err(|error| {
-            tracing::warn!("API proxy: can't reach local OpenAI surface on {port}: {error}");
+            tracing::warn!(
+                "API proxy: can't reach reacquired local OpenAI surface on {refreshed_port}: {error}"
+            );
         })?;
-    Ok((instance_request, upstream))
+    Ok(LocalAttemptUpstream {
+        port: refreshed_port,
+        _residency: Some(lease),
+        _instance: instance_request,
+        stream,
+    })
 }
 
 #[allow(clippy::too_many_arguments)]

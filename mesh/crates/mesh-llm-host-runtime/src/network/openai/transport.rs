@@ -27,8 +27,8 @@ pub use super::request_parse::{
 };
 pub(crate) use super::response::{
     PeerCapsuleIdSink, ServedByNodeIdSink, append_safe_header, is_valid_header_name,
-    send_400_observed, send_409_observed, send_503_observed, send_error_observed,
-    send_json_with_status_and_headers_observed, send_model_not_ready_observed,
+    send_400_observed, send_409_observed, send_503_observed, send_503_with_code_observed,
+    send_error_observed, send_json_with_status_and_headers_observed, send_model_not_ready_observed,
 };
 pub(crate) use super::routing_rank::request_budget_tokens_from_parts;
 
@@ -1858,6 +1858,28 @@ pub async fn route_http_endpoint_request(
     {
         return outcome;
     }
+    let _gpu_handoff = if let Some(plugin_name) = route_metadata.provider {
+        // Box handoff acquisition so its `select!` future does not expand
+        // `route_http_endpoint_request`'s stack frame on Windows debug builds.
+        match Box::pin(super::ingress::plugin_gpu_handoff::acquire_for_plugin(
+            node,
+            tcp_stream,
+            plugin_name,
+            model,
+        ))
+        .await
+        {
+            Ok(lease) => lease,
+            Err(super::ingress::plugin_gpu_handoff::PluginGpuHandoffError::ClientDisconnected) => {
+                return RouteDispatchOutcome::Dropped("client_disconnected");
+            }
+            Err(super::ingress::plugin_gpu_handoff::PluginGpuHandoffError::Failed(reason)) => {
+                return RouteDispatchOutcome::Failed(reason);
+            }
+        }
+    } else {
+        None
+    };
     let started = Instant::now();
     route_observer.route_selected_with_metadata(
         model,

@@ -74,28 +74,39 @@ impl Node {
             .clone()
             .try_acquire_owned()
             .context("native live transcription capacity exhausted")?;
-        let candidates = self
+        let candidates: Vec<(String, u16, std::sync::Weak<dyn InferenceBackend>)> = self
             .native_inference
             .backends
             .read()
             .await
             .get(&config.model)
-            .cloned()
+            .map(|instances| {
+                instances
+                    .iter()
+                    .map(|(id, entry)| (id.clone(), entry.port, Arc::downgrade(&entry.backend)))
+                    .collect()
+            })
             .context("native speech model is no longer loaded")?;
-        for (id, candidate) in candidates {
-            let Ok(Some(instance)) = self.begin_runtime_instance_request(candidate.port).await
+        for (id, port, weak_backend) in candidates {
+            let Ok(Some(instance)) = self.begin_runtime_instance_request(port).await else {
+                continue;
+            };
+            // Acquire the backend only after admission so waiters parked behind
+            // an unload/handoff gate never keep a retired GPU backend alive.
+            let Some(backend) = self
+                .native_inference
+                .backends
+                .read()
+                .await
+                .get(&config.model)
+                .and_then(|instances| instances.get(&id))
+                .filter(|active| {
+                    active.port == port && weak_backend.ptr_eq(&Arc::downgrade(&active.backend))
+                })
+                .map(|active| active.backend.clone())
             else {
                 continue;
             };
-            let current = self.native_inference.backends.read().await;
-            if !current
-                .get(&config.model)
-                .and_then(|instances| instances.get(&id))
-                .is_some_and(|active| Arc::ptr_eq(&active.backend, &candidate.backend))
-            {
-                continue;
-            }
-            drop(current);
             let context = InferenceRequestContext::new();
             let admission = SessionAdmission {
                 _slot: slot,
@@ -103,8 +114,7 @@ impl Node {
                 _inflight: self.begin_inflight_request(),
                 _cancel: CancelNativeOnDrop(context.cancellation_token()),
             };
-            let session = candidate
-                .backend
+            let session = backend
                 .realtime_transcription(config, context.clone())
                 .await
                 .map_err(|error| anyhow::anyhow!("start native live transcription: {error}"))?;
@@ -315,6 +325,181 @@ mod tests {
             .err()
             .unwrap();
         assert!(error.to_string().contains("no local model"));
+        node.endpoint.close().await;
+    }
+
+    struct DropTrackingSpeechBackend {
+        dropped: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl Drop for DropTrackingSpeechBackend {
+        fn drop(&mut self) {
+            self.dropped
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    #[async_trait]
+    impl InferenceBackend for DropTrackingSpeechBackend {
+        async fn models(&self) -> InferenceResult<Vec<ModelObject>> {
+            Ok(vec![ModelObject::new("speech")])
+        }
+        async fn chat_completion(
+            &self,
+            _: GenerationRequest,
+        ) -> InferenceResult<GenerationResponse> {
+            Err(InferenceError::unsupported("speech only"))
+        }
+        async fn chat_completion_stream(
+            &self,
+            _: GenerationRequest,
+            _: InferenceRequestContext,
+        ) -> InferenceResult<GenerationEventStream> {
+            Err(InferenceError::unsupported("speech only"))
+        }
+        async fn realtime_transcription(
+            &self,
+            _: RealtimeTranscriptionConfig,
+            _: InferenceRequestContext,
+        ) -> InferenceResult<skippy_inference_api::realtime::RealtimeTranscriptionSession> {
+            panic!("retired speech backend must not start transcription after unload");
+        }
+    }
+
+    #[tokio::test]
+    async fn waiting_transcription_does_not_keep_unloaded_speech_backend_alive() {
+        let node = Node::new_for_tests(NodeRole::Host { http_port: 9 })
+            .await
+            .unwrap();
+        node.set_hosted_models(vec!["speech".into()]).await;
+        node.set_serving_models(vec!["speech".into()]).await;
+        node.upsert_served_model_descriptor(ServedModelDescriptor {
+            identity: ServedModelIdentity {
+                model_name: "speech".into(),
+                is_primary: true,
+                ..Default::default()
+            },
+            capabilities_known: true,
+            metadata: Some(ServedModelMetadata {
+                workload_class: Some(ModelWorkloadClass::SpeechRecognition),
+                ..Default::default()
+            }),
+            ..Default::default()
+        })
+        .await;
+
+        let config: crate::plugin::MeshConfig = toml::from_str(
+            r#"
+[[models]]
+model = "speech"
+[models.lifecycle]
+load = "on_demand"
+idle_timeout_secs = 300
+prefetch = false
+"#,
+        )
+        .unwrap();
+        let (service, mut intents, targets_tx) =
+            crate::runtime::native_model_lifecycle::NativeModelLifecycle::test_service(&config);
+        targets_tx.send_modify(|t| {
+            t.targets.insert(
+                "speech".into(),
+                vec![crate::inference::election::InferenceTarget::Local(9)],
+            );
+        });
+        service.record_loaded("speech", "speech-instance", "speech", 9);
+        assert!(node.native_model_lifecycle.set(service.clone()).is_ok());
+
+        let instance_lifecycle = Arc::new(tokio::sync::Mutex::new(InstanceLifecycleRecord::new(
+            InstanceLifecycleState::Serving,
+            4,
+        )));
+        node.register_runtime_instance_lifecycle(9, instance_lifecycle.clone());
+
+        let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let backend: Arc<dyn InferenceBackend> = Arc::new(DropTrackingSpeechBackend {
+            dropped: dropped.clone(),
+        });
+        node.register_native_backend("speech", "speech-instance", 9, Some(backend), None)
+            .await;
+
+        // Hold an active lease so the exclusive_gpu handoff queues its writer first.
+        let active_lease = service.acquire("speech").await.unwrap().unwrap();
+        let mut checkpoints = service.install_gate_wait_checkpoint();
+
+        let handoff = {
+            let service = service.clone();
+            tokio::spawn(async move { service.acquire_exclusive_gpu_handoff().await.unwrap() })
+        };
+        assert_eq!(
+            tokio::time::timeout(std::time::Duration::from_secs(2), checkpoints.recv())
+                .await
+                .unwrap()
+                .unwrap(),
+            "exclusive_gpu_handoff_write"
+        );
+
+        // Start a transcription request while handoff is queued: it must park on
+        // admission without holding a strong clone of the backend Arc.
+        let waiter = {
+            let node = node.clone();
+            tokio::spawn(async move {
+                node.native_live_transcription(RealtimeTranscriptionConfig::new("speech"))
+                    .await
+            })
+        };
+        assert_eq!(
+            tokio::time::timeout(std::time::Duration::from_secs(2), checkpoints.recv())
+                .await
+                .unwrap()
+                .unwrap(),
+            "lease_port_read"
+        );
+
+        drop(active_lease);
+        let crate::runtime::ModelIntent::Unload {
+            completion: Some(completion),
+            ..
+        } = tokio::time::timeout(std::time::Duration::from_secs(2), intents.recv())
+            .await
+            .unwrap()
+            .unwrap()
+        else {
+            panic!("expected unload intent");
+        };
+
+        // Simulate teardown: unregister the backend and complete unload while the
+        // waiter is still blocked behind the handoff write gate.
+        {
+            let mut record = instance_lifecycle.lock().await;
+            let _ = record.mark_draining(std::time::Instant::now());
+            let _ = record.transition_to_unloading();
+            let _ = record.transition_to(InstanceLifecycleState::Stopped);
+        }
+        node.unregister_runtime_instance_lifecycle(9);
+        node.unregister_native_backend("speech", "speech-instance")
+            .await;
+        service.record_unloaded("speech-instance");
+        targets_tx.send_modify(|t| t.targets.clear());
+        completion
+            .send(Ok(crate::api::RuntimeUnloadResponse {
+                model: "speech".into(),
+                instance_id: "speech-instance".into(),
+                unloaded: true,
+            }))
+            .unwrap();
+
+        let handoff_lease = handoff.await.unwrap();
+        assert!(
+            dropped.load(std::sync::atomic::Ordering::SeqCst),
+            "parked transcription waiter must not keep the unloaded speech backend alive during plugin handoff"
+        );
+
+        drop(handoff_lease);
+        assert!(
+            waiter.await.unwrap().is_err(),
+            "waiter must reject the retired instance after handoff completes"
+        );
         node.endpoint.close().await;
     }
 }

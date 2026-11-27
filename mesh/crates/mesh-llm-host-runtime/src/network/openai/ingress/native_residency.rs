@@ -255,7 +255,7 @@ async fn dispatch_cold(
         .flatten();
     crate::runtime::native_model_lifecycle::with_request_lease(
         lease,
-        route_prepared_request(
+        Box::pin(route_prepared_request(
             local_only,
             stream,
             request,
@@ -263,7 +263,7 @@ async fn dispatch_cold(
             Some(&execution_model),
             required_tokens,
             observer,
-        ),
+        )),
     )
     .await
 }

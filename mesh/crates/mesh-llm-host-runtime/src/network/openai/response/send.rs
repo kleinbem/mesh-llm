@@ -146,6 +146,24 @@ pub(crate) async fn send_503_observed(
     send_error_observed(stream, 503, reason, route_observer).await
 }
 
+pub(crate) async fn send_503_with_code_observed(
+    stream: ClientStream,
+    reason: &str,
+    error_code: &str,
+    route_observer: OpenAiRouteObserver<'_>,
+) -> std::io::Result<()> {
+    tracing::warn!("503 → client ({error_code}): {reason}");
+    send_openai_error_with(
+        stream,
+        503,
+        reason,
+        Some(error_code),
+        None,
+        Some(route_observer),
+    )
+    .await
+}
+
 /// Seconds a client is told to wait (`Retry-After`) before retrying a model
 /// that is not ready here yet.
 const MODEL_NOT_READY_RETRY_AFTER_SECS: u32 = 5;

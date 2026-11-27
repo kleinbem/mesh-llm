@@ -432,6 +432,46 @@ mod requests {
         assert!(lifecycle.models["test"].instance.lock().unwrap().is_some());
     }
 
+    #[tokio::test]
+    async fn exclusive_gpu_handoff_succeeds_when_earlier_owner_unload_already_cleared_residency() {
+        let (lifecycle, mut intents, _targets) = fixture(300);
+        lifecycle.record_loaded("test", "runtime-1", "loaded-test", 1234);
+
+        let handoff_task = {
+            let lifecycle = lifecycle.clone();
+            tokio::spawn(async move { lifecycle.acquire_exclusive_gpu_handoff().await })
+        };
+        let ModelIntent::Unload {
+            target,
+            completion: Some(completion),
+            ..
+        } = intents.recv().await.unwrap()
+        else {
+            panic!("expected unload intent")
+        };
+        assert_eq!(target, UnloadTarget::Instance("runtime-1".into()));
+
+        // An earlier owner-requested unload finishes first and clears residency,
+        // so the control loop rejects the duplicate unload as missing.
+        lifecycle.record_unloaded("runtime-1");
+        completion
+            .send(Err(anyhow::anyhow!(
+                "model or runtime instance 'runtime-1' is not loaded"
+            )))
+            .unwrap();
+
+        let lease = handoff_task
+            .await
+            .unwrap()
+            .expect("handoff should succeed once the matching instance no longer holds residency");
+        assert!(
+            lifecycle.models["test"].gate.try_read().is_err(),
+            "handoff lease must remain held after succeeding"
+        );
+        drop(lease);
+        assert!(lifecycle.models["test"].gate.try_read().is_ok());
+    }
+
     /// Rejections and lost completions wait another idle interval before retrying.
     #[tokio::test]
     async fn deferred_idle_unloads_back_off_before_retrying() {

@@ -124,7 +124,7 @@ pub(super) async fn relay(
         .flatten();
     crate::runtime::native_model_lifecycle::with_request_lease(
         lease,
-        run_session(node, client, &request.raw, &model, target),
+        Box::pin(run_session(node, client, &request.raw, &model, target)),
     )
     .await;
 }
@@ -137,14 +137,43 @@ async fn run_session(
     model: &str,
     target: InferenceTarget,
 ) {
+    let mut target = target;
+    let mut _reacquired_lease = None;
     let _instance = if let InferenceTarget::Local(port) = target {
+        let managed_model = node
+            .native_model_lifecycle
+            .get()
+            .and_then(|service| service.managed_model_for(port, Some(model)));
         match node.begin_runtime_instance_request(port).await {
             Ok(guard) => guard,
             Err(_) => {
-                let _ =
-                    crate::network::openai::send_503(client, "local realtime instance is draining")
+                let reacquired = if let (Some(service), Some(managed_model)) =
+                    (node.native_model_lifecycle.get(), managed_model)
+                {
+                    Box::pin(reacquire_managed_realtime_port(
+                        node,
+                        service,
+                        &managed_model,
+                    ))
+                    .await
+                } else {
+                    None
+                };
+                match reacquired {
+                    Some((refreshed_port, lease, guard)) => {
+                        target = InferenceTarget::Local(refreshed_port);
+                        _reacquired_lease = Some(lease);
+                        guard
+                    }
+                    None => {
+                        let _ = crate::network::openai::send_503(
+                            client,
+                            "local realtime instance is draining",
+                        )
                         .await;
-                return;
+                        return;
+                    }
+                }
             }
         }
     } else {
@@ -159,6 +188,26 @@ async fn run_session(
         InferenceTarget::None => Err(anyhow::anyhow!("no target")),
     };
     log_session_end(model, started.elapsed().as_secs(), result);
+}
+
+async fn reacquire_managed_realtime_port(
+    node: &mesh::Node,
+    service: &std::sync::Arc<crate::runtime::native_model_lifecycle::NativeModelLifecycle>,
+    managed_model: &str,
+) -> Option<(
+    u16,
+    crate::runtime::native_model_lifecycle::RequestLease,
+    Option<crate::runtime::InstanceRequestGuard>,
+)> {
+    let lease = service.acquire(managed_model).await.ok().flatten()?;
+    let refreshed_port = service.port_for(managed_model)?;
+    let guard = crate::runtime::native_model_lifecycle::with_request_lease(
+        Some(lease.clone()),
+        node.begin_runtime_instance_request(refreshed_port),
+    )
+    .await
+    .ok()?;
+    Some((refreshed_port, lease, guard))
 }
 
 fn log_session_end(model: &str, seconds: u64, result: anyhow::Result<SessionEnd>) {

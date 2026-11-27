@@ -90,6 +90,16 @@ pub(crate) struct ExclusiveGpuHandoffLease {
     _gates: Vec<OwnedRwLockWriteGuard<()>>,
 }
 
+/// Outcome of requesting a residency lease for a selected local port.
+pub(crate) enum PortLease {
+    /// Port is not managed by `NativeModelLifecycle`.
+    Unmanaged,
+    /// Port is managed and currently leased by this request.
+    Leased(RequestLease),
+    /// Port belonged to a managed model that retired before or during admission wait.
+    Retired,
+}
+
 impl Drop for RequestLeaseInner {
     fn drop(&mut self) {
         *self
@@ -124,7 +134,7 @@ impl NativeModelLifecycle {
     }
 
     #[cfg(test)]
-    fn install_gate_wait_checkpoint(&self) -> mpsc::UnboundedReceiver<&'static str> {
+    pub(crate) fn install_gate_wait_checkpoint(&self) -> mpsc::UnboundedReceiver<&'static str> {
         let (tx, rx) = mpsc::unbounded_channel();
         *self
             .gate_wait_checkpoint
@@ -299,9 +309,37 @@ impl NativeModelLifecycle {
         residency.gate.clone().write_owned().await
     }
 
+    /// Resolve the configured managed identity currently owning `port`, or matching `model`.
+    pub(crate) fn managed_model_for(&self, port: u16, model: Option<&str>) -> Option<String> {
+        if let Some((key, _)) = self.models.iter().find(|(_, residency)| {
+            residency
+                .instance
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .as_ref()
+                .is_some_and(|(_, _, p)| *p == port)
+        }) {
+            return Some(key.clone());
+        }
+        model
+            .and_then(|name| self.residency(name))
+            .map(|(key, _)| key.clone())
+    }
+
+    /// Current local serving port for a managed model, when loaded.
+    pub(crate) fn port_for(&self, model: &str) -> Option<u16> {
+        let (_, residency) = self.residency(model)?;
+        residency
+            .instance
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .map(|(_, _, port)| *port)
+    }
+
     /// Lease the actual selected local port, including routes bypassing HTTP ingress.
-    pub(crate) async fn lease_port(&self, port: u16) -> Option<RequestLease> {
-        let residency = self
+    pub(crate) async fn lease_port(&self, port: u16) -> PortLease {
+        let Some(residency) = self
             .models
             .values()
             .find(|r| {
@@ -310,8 +348,11 @@ impl NativeModelLifecycle {
                     .unwrap_or_else(|e| e.into_inner())
                     .as_ref()
                     .is_some_and(|(_, _, p)| *p == port)
-            })?
-            .clone();
+            })
+            .cloned()
+        else {
+            return PortLease::Unmanaged;
+        };
         if let Some(existing) = current_request_lease_for(&residency) {
             let still_owned = residency
                 .instance
@@ -319,7 +360,11 @@ impl NativeModelLifecycle {
                 .unwrap_or_else(|e| e.into_inner())
                 .as_ref()
                 .is_some_and(|(_, _, p)| *p == port);
-            return still_owned.then_some(existing);
+            return if still_owned {
+                PortLease::Leased(existing)
+            } else {
+                PortLease::Retired
+            };
         }
         let gate = self.acquire_gate_read(&residency, "lease_port_read").await;
         let still_owned = residency
@@ -328,7 +373,11 @@ impl NativeModelLifecycle {
             .unwrap_or_else(|e| e.into_inner())
             .as_ref()
             .is_some_and(|(_, _, p)| *p == port);
-        still_owned.then_some(RequestLease::new(residency, gate))
+        if still_owned {
+            PortLease::Leased(RequestLease::new(residency, gate))
+        } else {
+            PortLease::Retired
+        }
     }
 
     /// Keep this lease until dispatch (including streaming) has finished.
@@ -408,28 +457,43 @@ impl NativeModelLifecycle {
                     let model_name = model.clone();
                     tokio::spawn(async move {
                         let _operation = operation;
-                        let outcome = result
-                            .await
-                            .context("native model unload interrupted during plugin GPU handoff")
-                            .and_then(|unload_result| {
-                                unload_result.with_context(|| {
-                                    format!(
-                                        "failed to unload native model '{model_name}' for exclusive_gpu plugin handoff"
-                                    )
-                                })
-                            });
-                        if outcome.is_ok() {
-                            let mut slot = residency_for_task
-                                .instance
-                                .lock()
-                                .unwrap_or_else(|e| e.into_inner());
-                            if slot
-                                .as_ref()
-                                .is_some_and(|(id, _, _)| id == &instance_id)
-                            {
-                                *slot = None;
+                        let outcome = match result.await {
+                            Err(_) => Err(anyhow::anyhow!(
+                                "native model unload interrupted during plugin GPU handoff"
+                            )),
+                            Ok(Ok(_)) => {
+                                let mut slot = residency_for_task
+                                    .instance
+                                    .lock()
+                                    .unwrap_or_else(|e| e.into_inner());
+                                if slot
+                                    .as_ref()
+                                    .is_some_and(|(id, _, _)| id == &instance_id)
+                                {
+                                    *slot = None;
+                                }
+                                Ok(())
                             }
-                        }
+                            Ok(Err(unload_err)) => {
+                                // An earlier owner-requested unload or exit may have already
+                                // freed the GPU and cleared residency while this unload was queued.
+                                let still_resident = residency_for_task
+                                    .instance
+                                    .lock()
+                                    .unwrap_or_else(|e| e.into_inner())
+                                    .as_ref()
+                                    .is_some_and(|(id, _, _)| id == &instance_id);
+                                if still_resident {
+                                    Err(unload_err).with_context(|| {
+                                        format!(
+                                            "failed to unload native model '{model_name}' for exclusive_gpu plugin handoff"
+                                        )
+                                    })
+                                } else {
+                                    Ok(())
+                                }
+                            }
+                        };
                         let _ = done_tx.send(outcome.map(|_| gate));
                     });
                     done_rx
