@@ -1540,6 +1540,53 @@ Against a host without it, `subscribe_inference_observation` fails at once; a
 plugin that cannot run without it declares `.required(true)` and refuses to
 initialize there.
 
+## Exclusive GPU Handoff
+
+An inference plugin that needs the GPU to itself (an out-of-core streaming
+engine on an 8 GB board, for example) can't share it with the native models
+this node keeps loaded, and it can't unload them itself. The operator opts the
+plugin in:
+
+```toml
+[[plugin]]
+name = "example"
+exclusive_gpu = true
+```
+
+Before the host forwards an inference request to this plugin, it waits for
+in-flight requests on its on-demand native models to finish, unloads the ones
+that are loaded, and keeps them from loading again until the plugin's response
+has ended, streamed responses included. The setting applies without a restart.
+
+**What it covers.** Only native models configured with
+`lifecycle.load = "on_demand"`. Models loaded at startup, and models an owner
+loaded by command, stay loaded. Requests that arrive from peers for this node's
+plugin get the same handoff, because they enter through the same ingress, so
+mesh traffic to the plugin can unload this node's native models as well.
+
+**Waiting.** While one request to an `exclusive_gpu` plugin holds the handoff,
+requests to any `exclusive_gpu` plugin on this node wait for it, and native
+requests wait and then reload the model. A node without on-demand native models
+has nothing to hand off, so its plugin requests don't wait for each other. The
+handoff itself waits for native requests already running, a live transcription
+session included, up to the 300-second limit: a plugin request still waiting
+then gets HTTP 503 with the code `plugin_gpu_handoff_failed`. A native request
+whose model was loaded when it arrived waits as long as the plugin response
+runs; one that has to load the model gives up its local load after 300 seconds,
+like any native load that times out, and is then routed like any other failed
+load. A request the plugin's admission policy denies never starts a handoff.
+
+**Disconnects.** A plugin request whose client resets the connection while it
+waits is dropped without unloading anything. A client that closes the
+connection normally can't be told apart from one that only closed its sending
+side and still reads the answer, so that request goes ahead.
+
+**Nested calls.** While the plugin serves a request, a nested
+`PluginContext::infer` call from that request to one of this node's on-demand
+native models, or to another `exclusive_gpu` plugin, waits for the request to
+end and runs into its timeout. A request to a virtual model takes no handoff
+itself, so its nested call into an `exclusive_gpu` plugin takes it as usual.
+
 ## What The Host Owns
 
 The host is responsible for:
