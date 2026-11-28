@@ -741,3 +741,96 @@ async fn warm_native_http_request_reloads_and_succeeds_after_handoff_unloads_sta
     ingress_task.await.unwrap();
     node.endpoint.close().await;
 }
+
+#[tokio::test]
+async fn exclusive_gpu_plugin_without_native_lifecycle_takes_no_handoff() {
+    let node = Box::pin(mesh::Node::new_for_tests(mesh::NodeRole::Worker))
+        .await
+        .expect("test node should start");
+    let config_dir = tempfile::tempdir().expect("tempdir for test config");
+    let config_path = config_dir.path().join("config.toml");
+    std::fs::write(
+        &config_path,
+        format!("[[plugin]]\nname = \"{PLUGIN_NAME}\"\nexclusive_gpu = true\n"),
+    )
+    .expect("write test config");
+    node.replace_config_state_for_test(&config_path)
+        .await
+        .expect("load test config state");
+    assert!(node.plugin_exclusive_gpu_enabled(PLUGIN_NAME).await);
+    assert!(node.native_model_lifecycle.get().is_none());
+
+    let result = plugin_gpu_handoff::acquire_for_plugin(
+        &node,
+        &ClientStream::null(),
+        PLUGIN_NAME,
+        Some(PLUGIN_MODEL),
+    )
+    .await;
+    assert!(
+        matches!(result, Ok(None)),
+        "no native lifecycle means nothing to hand off"
+    );
+    node.endpoint.close().await;
+}
+
+#[tokio::test]
+async fn endpoint_route_without_a_plugin_provider_takes_no_gpu_handoff() {
+    let (node, mut intents, _targets_tx, _config_dir) =
+        node_with_plugin_and_on_demand_native(Some(true)).await;
+
+    let backend = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let backend_addr = backend.local_addr().unwrap();
+    let backend_task = tokio::spawn(async move {
+        let (mut stream, _) = backend.accept().await.unwrap();
+        let _req = proxy::read_http_request(&mut stream).await.unwrap();
+        stream
+            .write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 11\r\nConnection: close\r\n\r\n{\"ok\":true}",
+            )
+            .await
+            .unwrap();
+    });
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (client_res, server_res) = tokio::join!(TcpStream::connect(addr), listener.accept());
+    let mut client = client_res.unwrap();
+    let (server, _) = server_res.unwrap();
+    let request = tests::plugin_only_request(PLUGIN_MODEL);
+
+    let dispatch_node = node.clone();
+    let dispatch = tokio::spawn(async move {
+        let mut server: ClientStream = server.into();
+        Box::pin(proxy::route_http_endpoint_request(
+            &dispatch_node,
+            Some(PLUGIN_MODEL),
+            proxy::RouteSelectionMetadata {
+                provider: None,
+                engine: None,
+            },
+            &mut server,
+            &format!("http://{backend_addr}"),
+            &request,
+            OpenAiRouteObserver::default(),
+        ))
+        .await
+    });
+
+    let mut response = String::new();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        client.read_to_string(&mut response),
+    )
+    .await
+    .expect("a route with no plugin provider must not wait on a GPU handoff")
+    .unwrap();
+    assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+    assert_responded_status(dispatch.await.unwrap(), 200);
+    backend_task.await.unwrap();
+    assert!(
+        intents.try_recv().is_err(),
+        "a route with no plugin provider must not unload native models"
+    );
+    node.endpoint.close().await;
+}

@@ -563,6 +563,8 @@ fn percent_encode(value: &str) -> String {
 }
 
 #[cfg(test)]
+mod lifecycle_tests;
+#[cfg(test)]
 mod quic_tests;
 
 #[cfg(test)]

@@ -698,6 +698,142 @@ mod requests {
     }
 
     #[test]
+    fn managed_identity_falls_back_to_the_model_name_once_no_instance_owns_the_port() {
+        let (lifecycle, _intents, _targets) = fixture(300);
+        // A retired port is no longer owned, so the request's model name decides.
+        assert_eq!(
+            lifecycle.managed_model_for(4321, Some("test")).as_deref(),
+            Some("test")
+        );
+        assert_eq!(lifecycle.managed_model_for(4321, Some("unknown")), None);
+        assert_eq!(lifecycle.managed_model_for(4321, None), None);
+        lifecycle.record_loaded("test", "runtime-1", "loaded-test", 1234);
+        assert_eq!(
+            lifecycle.managed_model_for(1234, None).as_deref(),
+            Some("test")
+        );
+        assert_eq!(
+            lifecycle
+                .managed_model_for(4321, Some("loaded-test"))
+                .as_deref(),
+            Some("test")
+        );
+    }
+
+    #[tokio::test]
+    async fn lease_port_leaves_ports_no_managed_instance_owns_unmanaged() {
+        let (lifecycle, _intents, _targets) = fixture(300);
+        lifecycle.record_loaded("test", "runtime-1", "loaded-test", 1234);
+        assert!(matches!(
+            lifecycle.lease_port(4321).await,
+            PortLease::Unmanaged
+        ));
+        assert!(
+            lifecycle.models["test"].gate.try_write().is_ok(),
+            "an unmanaged port must not take the managed model's gate"
+        );
+        let PortLease::Leased(lease) = lifecycle.lease_port(1234).await else {
+            panic!("the owned port should be leased");
+        };
+        assert!(lifecycle.models["test"].gate.try_write().is_err());
+        drop(lease);
+    }
+
+    #[tokio::test]
+    async fn exclusive_gpu_handoff_reports_an_interrupted_unload_and_releases_the_gate() {
+        let (lifecycle, mut intents, _targets) = fixture(300);
+        lifecycle.record_loaded("test", "runtime-1", "loaded-test", 1234);
+        let handoff = {
+            let lifecycle = lifecycle.clone();
+            tokio::spawn(async move { lifecycle.acquire_exclusive_gpu_handoff().await })
+        };
+        let ModelIntent::Unload {
+            completion: Some(completion),
+            ..
+        } = tokio::time::timeout(Duration::from_secs(10), intents.recv())
+            .await
+            .expect("unload intent should arrive")
+            .expect("intent channel open")
+        else {
+            panic!("expected unload intent");
+        };
+        // The control loop stops without answering the unload.
+        drop(completion);
+        let err = tokio::time::timeout(Duration::from_secs(10), handoff)
+            .await
+            .expect("handoff should finish once the completion is dropped")
+            .unwrap()
+            .expect_err("an interrupted unload must fail the handoff");
+        assert_eq!(
+            err.to_string(),
+            "native model unload interrupted during plugin GPU handoff"
+        );
+        assert!(lifecycle.models["test"].instance.lock().unwrap().is_some());
+
+        // A later handoff must not stay blocked behind the interrupted one.
+        let retry = {
+            let lifecycle = lifecycle.clone();
+            tokio::spawn(async move { lifecycle.acquire_exclusive_gpu_handoff().await })
+        };
+        let ModelIntent::Unload {
+            target,
+            completion: Some(completion),
+            ..
+        } = tokio::time::timeout(Duration::from_secs(10), intents.recv())
+            .await
+            .expect("retried unload intent should arrive")
+            .expect("intent channel open")
+        else {
+            panic!("expected unload intent");
+        };
+        assert_eq!(target, UnloadTarget::Instance("runtime-1".into()));
+        completion
+            .send(Ok(crate::api::RuntimeUnloadResponse {
+                model: "loaded-test".into(),
+                instance_id: "runtime-1".into(),
+                unloaded: true,
+            }))
+            .unwrap();
+        let _lease = tokio::time::timeout(Duration::from_secs(10), retry)
+            .await
+            .expect("retried handoff should finish")
+            .unwrap()
+            .expect("retried handoff should succeed");
+    }
+
+    #[tokio::test]
+    async fn selected_instance_admission_on_an_unmanaged_port_takes_no_residency_lease() {
+        let (lifecycle, _intents, _targets) = fixture(300);
+        lifecycle.record_loaded("test", "runtime-1", "loaded-test", 1234);
+        let node = Box::pin(crate::mesh::Node::new_for_tests(
+            crate::mesh::NodeRole::Worker,
+        ))
+        .await
+        .unwrap();
+        assert!(node.native_model_lifecycle.set(lifecycle.clone()).is_ok());
+        let record = Arc::new(tokio::sync::Mutex::new(
+            crate::runtime::InstanceLifecycleRecord::new(
+                crate::runtime::InstanceLifecycleState::Serving,
+                10,
+            ),
+        ));
+        node.register_runtime_instance_lifecycle(4321, record.clone());
+        let guard = node
+            .begin_runtime_instance_request(4321)
+            .await
+            .expect("an unmanaged serving port should accept work")
+            .expect("a registered port should return a guard");
+        assert_eq!(record.lock().await.in_flight_count(), 1);
+        assert!(
+            lifecycle.models["test"].gate.try_write().is_ok(),
+            "an unmanaged port must not hold a managed model's gate"
+        );
+        drop(guard);
+        assert_eq!(record.lock().await.in_flight_count(), 0);
+        node.endpoint.close().await;
+    }
+
+    #[test]
     fn assigned_peer_execution_never_uses_a_remote_ready_target() {
         let peer = iroh::SecretKey::from_bytes(&[7; 32]).public();
         let mut targets = ModelTargets::default();
