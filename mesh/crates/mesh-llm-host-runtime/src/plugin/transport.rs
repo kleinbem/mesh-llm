@@ -1,3 +1,4 @@
+mod inbound_frames;
 mod model_requirements;
 mod operation_binding;
 use super::runtime::PluginRuntime;
@@ -97,6 +98,10 @@ pub(crate) const CONNECTION_LOOP: ConnectionLoopFn =
             let result: Result<()> = async {
                 // Started by the first status publication, if any.
                 let mut status_lane = None;
+                let mut inbound_frames = inbound_frames::InboundFrames::new(
+                    PLUGIN_ENVELOPE_PREFIX_READ_TIMEOUT,
+                    PLUGIN_ENVELOPE_BODY_READ_TIMEOUT,
+                );
                 loop {
                     tokio::select! {
                         maybe_outbound = outbound_rx.recv() => {
@@ -105,7 +110,7 @@ pub(crate) const CONNECTION_LOOP: ConnectionLoopFn =
                             };
                             write_envelope(&mut stream, &envelope).await?;
                         }
-                        inbound = read_envelope(&mut stream) => {
+                        inbound = inbound_frames.next(&mut stream) => {
                             let envelope = inbound?;
                             let request_id = envelope.request_id;
                             let plugin_id_from_env = envelope.plugin_id.clone();
@@ -407,6 +412,7 @@ impl LocalStream {
         Ok(read)
     }
 
+    #[cfg(test)]
     async fn read_exact(&mut self, bytes: &mut [u8]) -> Result<()> {
         match self {
             #[cfg(test)]
@@ -432,6 +438,7 @@ impl LocalStream {
         Ok(())
     }
 
+    #[cfg(test)]
     async fn read_exact_timeout(
         &mut self,
         bytes: &mut [u8],
@@ -614,6 +621,7 @@ pub(crate) async fn write_envelope(
     Ok(())
 }
 
+#[cfg(test)]
 pub(crate) async fn read_envelope(stream: &mut LocalStream) -> Result<super::proto::Envelope> {
     let mut len_buf = [0u8; 4];
     stream
