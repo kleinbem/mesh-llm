@@ -802,6 +802,63 @@ mod requests {
     }
 
     #[tokio::test]
+    async fn acquire_inside_its_own_lease_never_waits_behind_a_queued_handoff() {
+        let (lifecycle, mut intents, targets) = fixture(300);
+        let active = {
+            let lifecycle = lifecycle.clone();
+            tokio::spawn(async move { lifecycle.acquire("test").await.unwrap() })
+        };
+        finish_load(&lifecycle, intents.recv().await.unwrap(), &targets);
+        let outer_lease = active.await.unwrap();
+
+        let mut checkpoints = lifecycle.install_gate_wait_checkpoint();
+        let mut handoff_fut = std::pin::pin!(lifecycle.acquire_exclusive_gpu_handoff());
+        let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+        assert!(handoff_fut.as_mut().poll(&mut cx).is_pending());
+        assert_eq!(
+            checkpoints
+                .try_recv()
+                .expect("handoff should queue write gate"),
+            "exclusive_gpu_handoff_write"
+        );
+        assert!(lifecycle.models["test"].gate.try_read().is_err());
+
+        // While the model is ready the task's own lease is reused.
+        let reused = with_request_lease(outer_lease.clone(), async {
+            tokio::time::timeout(Duration::from_secs(10), lifecycle.acquire("test")).await
+        })
+        .await
+        .expect("acquire inside its own lease must not wait behind the queued handoff")
+        .expect("a ready model should reuse the lease");
+        assert!(reused.is_some());
+        drop(reused);
+
+        // The instance retires while the lease is held (owner unload, crash): the
+        // reacquire fails at once instead of reloading behind the handoff.
+        lifecycle.record_unloaded("runtime-1");
+        targets.send_modify(|targets| {
+            targets.targets.remove("loaded-test");
+        });
+        let retired = with_request_lease(outer_lease.clone(), async {
+            tokio::time::timeout(Duration::from_secs(10), lifecycle.acquire("test")).await
+        })
+        .await
+        .expect("a retired model must fail fast inside its own lease");
+        assert!(retired.is_err());
+        assert!(
+            intents.try_recv().is_err(),
+            "no reload while the request holds its lease"
+        );
+
+        // Releasing the lease lets the handoff through; nothing is left to unload.
+        drop(outer_lease);
+        let _handoff = tokio::time::timeout(Duration::from_secs(10), handoff_fut)
+            .await
+            .expect("handoff should finish once the lease is released")
+            .expect("handoff should succeed");
+    }
+
+    #[tokio::test]
     async fn selected_instance_admission_on_an_unmanaged_port_takes_no_residency_lease() {
         let (lifecycle, _intents, _targets) = fixture(300);
         lifecycle.record_loaded("test", "runtime-1", "loaded-test", 1234);

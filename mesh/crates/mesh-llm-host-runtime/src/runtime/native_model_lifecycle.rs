@@ -387,6 +387,14 @@ impl NativeModelLifecycle {
         };
         let model = model.clone();
         let residency = residency.clone();
+        // A task that already holds this model's lease must not take a second read:
+        // behind a queued handoff writer it would wait for itself until LOAD_TIMEOUT.
+        if let Some(existing) = current_request_lease_for(&residency) {
+            if ready(&self.targets(), &model, true) {
+                return Ok(Some(existing));
+            }
+            anyhow::bail!("native model '{model}' retired while this request holds its lease");
+        }
         tokio::time::timeout(LOAD_TIMEOUT, async {
             loop {
                 let gate = self.acquire_gate_read(&residency, "acquire_read").await;
