@@ -6,6 +6,7 @@ mod common;
 mod dispatch;
 mod external_endpoint;
 mod json_adaptation;
+mod local_upstream;
 mod models;
 pub(crate) mod prepared_dispatch;
 mod probe;

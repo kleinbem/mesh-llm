@@ -947,20 +947,8 @@ async fn finish_plugin_response(
     outcome: proxy::RouteDispatchOutcome,
 ) -> (proxy::RouteDispatchOutcome, Option<ClientStream>) {
     if !outcome.response_written() && !matches!(outcome, proxy::RouteDispatchOutcome::Dropped(_)) {
-        let write_result = if matches!(
-            outcome,
-            proxy::RouteDispatchOutcome::Failed(plugin_gpu_handoff::HANDOFF_FAILED_CODE)
-        ) {
-            Box::pin(proxy::send_503_with_code_observed(
-                stream,
-                &format!(
-                    "exclusive GPU handoff failed ({}) for model '{model_name}'",
-                    plugin_gpu_handoff::HANDOFF_FAILED_CODE
-                ),
-                plugin_gpu_handoff::HANDOFF_FAILED_CODE,
-                observer,
-            ))
-            .await
+        let write_result = if plugin_gpu_handoff::is_handoff_failure(&outcome) {
+            plugin_gpu_handoff::send_handoff_failed(stream, model_name, observer).await
         } else {
             proxy::send_503_observed(
                 stream,

@@ -4,6 +4,7 @@ use super::common::{
     retryable_route_result_from_error,
 };
 use super::dispatch::{RelayAttemptContext, relay_attempted_response};
+use super::local_upstream::acquire_local_attempt_upstream;
 use super::probe::{
     PEER_CAPSULE_ID_HEADER, ResponseProbe, peer_response_header_value, probe_http_response,
     probe_http_response_local,
@@ -18,7 +19,6 @@ use anyhow::Result;
 use mesh_llm_events::logging::identifiers::RequestId;
 use std::future::Future;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
-use tokio::net::TcpStream;
 
 /// Forward a request to local inference on `port`.
 pub(in crate::network::openai) async fn route_local_attempt(
@@ -101,88 +101,6 @@ async fn served_model_headers_for_mesh_peer(
         return None;
     }
     ServedModelHeaders::for_served_model(node, model, Some(port)).await
-}
-
-struct LocalAttemptUpstream {
-    port: u16,
-    _residency: Option<crate::runtime::native_model_lifecycle::RequestLease>,
-    _instance: Option<crate::runtime::InstanceRequestGuard>,
-    stream: TcpStream,
-}
-
-async fn acquire_local_attempt_upstream(
-    node: &mesh::Node,
-    port: u16,
-    model: Option<&str>,
-) -> Result<LocalAttemptUpstream, ()> {
-    let managed_model = node
-        .native_model_lifecycle
-        .get()
-        .and_then(|service| service.managed_model_for(port, model));
-    if let Ok(instance_request) = node.begin_runtime_instance_request(port).await {
-        if let Ok(stream) = TcpStream::connect(format!("127.0.0.1:{port}")).await {
-            return Ok(LocalAttemptUpstream {
-                port,
-                _residency: None,
-                _instance: instance_request,
-                stream,
-            });
-        }
-        tracing::warn!("API proxy: can't reach local OpenAI surface on {port}");
-    } else {
-        tracing::debug!(port, "local runtime instance rejected new work");
-    }
-
-    // If a warm on-demand managed instance retired while waiting behind an
-    // exclusive_gpu handoff or eviction, reload it by identity and refresh the port.
-    let (Some(service), Some(managed_model)) = (node.native_model_lifecycle.get(), managed_model)
-    else {
-        return Err(());
-    };
-    // Box the cold reload path so `route_local_attempt`'s stack frame stays small
-    // on Windows debug builds (2 MiB test thread stack).
-    Box::pin(reacquire_managed_local_attempt(
-        node,
-        service,
-        &managed_model,
-    ))
-    .await
-}
-
-async fn reacquire_managed_local_attempt(
-    node: &mesh::Node,
-    service: &std::sync::Arc<crate::runtime::native_model_lifecycle::NativeModelLifecycle>,
-    managed_model: &str,
-) -> Result<LocalAttemptUpstream, ()> {
-    let lease = service
-        .acquire(managed_model)
-        .await
-        .map_err(|error| {
-            tracing::warn!(model = %managed_model, %error, "reacquire of retired managed model failed");
-        })?
-        .ok_or(())?;
-    let refreshed_port = service.port_for(managed_model).ok_or(())?;
-    let instance_request = crate::runtime::native_model_lifecycle::with_request_lease(
-        Some(lease.clone()),
-        node.begin_runtime_instance_request(refreshed_port),
-    )
-    .await
-    .map_err(|error| {
-        tracing::debug!(%error, port = refreshed_port, "reacquired local runtime instance rejected new work");
-    })?;
-    let stream = TcpStream::connect(format!("127.0.0.1:{refreshed_port}"))
-        .await
-        .map_err(|error| {
-            tracing::warn!(
-                "API proxy: can't reach reacquired local OpenAI surface on {refreshed_port}: {error}"
-            );
-        })?;
-    Ok(LocalAttemptUpstream {
-        port: refreshed_port,
-        _residency: Some(lease),
-        _instance: instance_request,
-        stream,
-    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -422,7 +340,7 @@ mod tests {
     use std::task::{Context, Poll};
     use tokio::io::AsyncReadExt;
     use tokio::io::ReadBuf;
-    use tokio::net::TcpListener;
+    use tokio::net::{TcpListener, TcpStream};
     use tokio::sync::oneshot;
     use tokio::time::{Duration, timeout};
 
@@ -1110,150 +1028,5 @@ mod tests {
 
             assert_eq!(forwarded, REQUEST);
         }
-    }
-
-    const MANAGED: &str = "native-on-demand";
-
-    type ManagedFixture = (
-        mesh::Node,
-        Arc<crate::runtime::native_model_lifecycle::NativeModelLifecycle>,
-        tokio::sync::mpsc::Receiver<crate::runtime::ModelIntent>,
-        tokio::sync::watch::Sender<crate::inference::election::ModelTargets>,
-    );
-
-    async fn node_with_managed_model() -> ManagedFixture {
-        let node = Box::pin(mesh::Node::new_for_tests(mesh::NodeRole::Worker))
-            .await
-            .unwrap();
-        let config: crate::plugin::MeshConfig = toml::from_str(&format!(
-            "[[models]]\nmodel = \"{MANAGED}\"\n[models.lifecycle]\nload = \"on_demand\"\nprefetch = false\n"
-        ))
-        .unwrap();
-        let (service, intents, targets) =
-            crate::runtime::native_model_lifecycle::NativeModelLifecycle::test_service(&config);
-        assert!(node.native_model_lifecycle.set(service.clone()).is_ok());
-        (node, service, intents, targets)
-    }
-
-    /// Marks `port` as the loaded instance of `MANAGED` with a lifecycle record in `state`.
-    fn load_managed_on(
-        fixture: &ManagedFixture,
-        port: u16,
-        state: crate::runtime::InstanceLifecycleState,
-    ) -> Arc<tokio::sync::Mutex<crate::runtime::InstanceLifecycleRecord>> {
-        let (node, service, _, targets) = fixture;
-        targets.send_modify(|t| {
-            t.targets.insert(
-                MANAGED.into(),
-                vec![crate::inference::election::InferenceTarget::Local(port)],
-            );
-        });
-        service.record_loaded(MANAGED, "runtime-1", MANAGED, port);
-        let record = Arc::new(tokio::sync::Mutex::new(
-            crate::runtime::InstanceLifecycleRecord::new(state, 4),
-        ));
-        node.register_runtime_instance_lifecycle(port, record.clone());
-        record
-    }
-
-    #[tokio::test]
-    async fn reacquire_of_a_retired_managed_model_fails_when_it_is_unmanaged_or_cannot_reload() {
-        let (node, service, mut intents, targets) = node_with_managed_model().await;
-        assert!(
-            Box::pin(reacquire_managed_local_attempt(&node, &service, "unknown"))
-                .await
-                .is_err()
-        );
-        assert!(intents.try_recv().is_err(), "unmanaged names must not load");
-
-        let reacquire = {
-            let (node, service) = (node.clone(), service.clone());
-            tokio::spawn(async move {
-                Box::pin(reacquire_managed_local_attempt(&node, &service, MANAGED))
-                    .await
-                    .is_err()
-            })
-        };
-        let crate::runtime::ModelIntent::Load {
-            config_model_id,
-            completion: Some(completion),
-            ..
-        } = timeout(Duration::from_secs(10), intents.recv())
-            .await
-            .expect("reacquire should request a reload")
-            .unwrap()
-        else {
-            panic!("expected a load intent");
-        };
-        assert_eq!(config_model_id.as_deref(), Some(MANAGED));
-        completion
-            .send(Err(anyhow::anyhow!("capacity exhausted")))
-            .unwrap();
-        assert!(
-            timeout(Duration::from_secs(10), reacquire)
-                .await
-                .expect("reacquire should finish after the failed reload")
-                .unwrap()
-        );
-        assert_eq!(service.port_for(MANAGED), None);
-        drop(targets);
-        node.endpoint.close().await;
-    }
-
-    #[tokio::test]
-    async fn reacquire_does_not_dial_a_refreshed_port_that_rejects_new_work() {
-        let mut fixture = node_with_managed_model().await;
-        let backend = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = backend.local_addr().unwrap().port();
-        load_managed_on(
-            &fixture,
-            port,
-            crate::runtime::InstanceLifecycleState::Stopped,
-        );
-        let (node, service, intents, _) = &mut fixture;
-        assert_eq!(service.port_for(MANAGED), Some(port));
-        assert!(
-            Box::pin(reacquire_managed_local_attempt(node, service, MANAGED))
-                .await
-                .is_err()
-        );
-        assert!(intents.try_recv().is_err(), "a ready model must not reload");
-        tokio::select! {
-            biased;
-            accepted = backend.accept() => {
-                panic!("a rejecting instance must not be dialed: {accepted:?}");
-            }
-            _ = tokio::task::yield_now() => {}
-        }
-        node.endpoint.close().await;
-    }
-
-    #[tokio::test]
-    async fn reacquire_reports_an_unreachable_refreshed_port_and_releases_its_admission() {
-        let fixture = node_with_managed_model().await;
-        // Bind and drop a listener for a loopback port nothing listens on.
-        let port = TcpListener::bind("127.0.0.1:0")
-            .await
-            .unwrap()
-            .local_addr()
-            .unwrap()
-            .port();
-        let record = load_managed_on(
-            &fixture,
-            port,
-            crate::runtime::InstanceLifecycleState::Serving,
-        );
-        let (node, service, _, _) = &fixture;
-        assert!(
-            Box::pin(reacquire_managed_local_attempt(node, service, MANAGED))
-                .await
-                .is_err()
-        );
-        assert_eq!(record.lock().await.in_flight_count(), 0);
-        assert!(
-            record.lock().await.is_accepting_work(),
-            "a refused connect must leave the instance serving"
-        );
-        node.endpoint.close().await;
     }
 }

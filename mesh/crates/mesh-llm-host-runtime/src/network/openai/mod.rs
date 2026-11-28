@@ -6,6 +6,7 @@ pub(crate) mod client_stream;
 mod exchange_admission;
 mod forwarded_request;
 pub(crate) mod ingress;
+mod managed_reacquire;
 pub(crate) mod model_discovery;
 pub(crate) mod model_names;
 mod nested_inference;

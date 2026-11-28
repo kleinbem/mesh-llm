@@ -50,3 +50,50 @@ pub(in crate::network::openai) async fn acquire_for_plugin(
         }
     }
 }
+
+/// The handoff for a selected route; a route without a plugin provider takes none.
+pub(in crate::network::openai) async fn acquire_for_route(
+    node: &mesh::Node,
+    tcp_stream: &ClientStream,
+    provider: Option<&str>,
+    model_name: Option<&str>,
+) -> Result<Option<ExclusiveGpuHandoffLease>, PluginGpuHandoffError> {
+    match provider {
+        Some(plugin_name) => acquire_for_plugin(node, tcp_stream, plugin_name, model_name).await,
+        None => Ok(None),
+    }
+}
+
+impl PluginGpuHandoffError {
+    /// The outcome a route returns instead of dialing the plugin.
+    pub(in crate::network::openai) fn into_outcome(self) -> proxy::RouteDispatchOutcome {
+        match self {
+            Self::ClientDisconnected => proxy::RouteDispatchOutcome::Dropped("client_disconnected"),
+            Self::Failed(reason) => proxy::RouteDispatchOutcome::Failed(reason),
+        }
+    }
+}
+
+pub(in crate::network::openai) fn is_handoff_failure(
+    outcome: &proxy::RouteDispatchOutcome,
+) -> bool {
+    matches!(
+        outcome,
+        proxy::RouteDispatchOutcome::Failed(HANDOFF_FAILED_CODE)
+    )
+}
+
+/// HTTP 503 carrying the stable `plugin_gpu_handoff_failed` code.
+pub(in crate::network::openai) async fn send_handoff_failed(
+    stream: ClientStream,
+    model_name: &str,
+    observer: OpenAiRouteObserver<'_>,
+) -> std::io::Result<()> {
+    Box::pin(proxy::send_503_with_code_observed(
+        stream,
+        &format!("exclusive GPU handoff failed ({HANDOFF_FAILED_CODE}) for model '{model_name}'"),
+        HANDOFF_FAILED_CODE,
+        observer,
+    ))
+    .await
+}

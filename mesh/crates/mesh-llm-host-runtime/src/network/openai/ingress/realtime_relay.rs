@@ -199,15 +199,14 @@ async fn reacquire_managed_realtime_port(
     crate::runtime::native_model_lifecycle::RequestLease,
     Option<crate::runtime::InstanceRequestGuard>,
 )> {
-    let lease = service.acquire(managed_model).await.ok().flatten()?;
-    let refreshed_port = service.port_for(managed_model)?;
-    let guard = crate::runtime::native_model_lifecycle::with_request_lease(
-        Some(lease.clone()),
-        node.begin_runtime_instance_request(refreshed_port),
+    let reacquired = crate::network::openai::managed_reacquire::reacquire_managed_instance(
+        node,
+        service,
+        managed_model,
     )
     .await
     .ok()?;
-    Some((refreshed_port, lease, guard))
+    Some((reacquired.port, reacquired.lease, reacquired.instance))
 }
 
 fn log_session_end(model: &str, seconds: u64, result: anyhow::Result<SessionEnd>) {

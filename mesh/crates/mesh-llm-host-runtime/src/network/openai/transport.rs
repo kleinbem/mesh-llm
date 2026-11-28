@@ -1858,27 +1858,17 @@ pub async fn route_http_endpoint_request(
     {
         return outcome;
     }
-    let _gpu_handoff = if let Some(plugin_name) = route_metadata.provider {
-        // Box handoff acquisition so its `select!` future does not expand
-        // `route_http_endpoint_request`'s stack frame on Windows debug builds.
-        match Box::pin(super::ingress::plugin_gpu_handoff::acquire_for_plugin(
-            node,
-            tcp_stream,
-            plugin_name,
-            model,
-        ))
-        .await
-        {
-            Ok(lease) => lease,
-            Err(super::ingress::plugin_gpu_handoff::PluginGpuHandoffError::ClientDisconnected) => {
-                return RouteDispatchOutcome::Dropped("client_disconnected");
-            }
-            Err(super::ingress::plugin_gpu_handoff::PluginGpuHandoffError::Failed(reason)) => {
-                return RouteDispatchOutcome::Failed(reason);
-            }
-        }
-    } else {
-        None
+    // Boxed so the handoff's `select!` future stays off this frame on Windows debug builds.
+    let _gpu_handoff = match Box::pin(super::ingress::plugin_gpu_handoff::acquire_for_route(
+        node,
+        tcp_stream,
+        route_metadata.provider,
+        model,
+    ))
+    .await
+    {
+        Ok(lease) => lease,
+        Err(error) => return error.into_outcome(),
     };
     let started = Instant::now();
     route_observer.route_selected_with_metadata(
